@@ -1,0 +1,47 @@
+{
+  "name": "axvon-hrms",
+  "version": "2.0.0",
+  "description": "AXVON HRMS - Enterprise Human Resource Management System",
+  "main": "main.js",
+  "author": { "name": "Athul KV", "email": "kvathul27@gmail.com" },
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "io.axvon.hrms",
+    "productName": "AXVON HRMS",
+    "copyright": "© 2025 Athul KV. All rights reserved.",
+    "asar": true,
+    "directories": { "output": "dist" },
+    "files": ["main.js","preload.js","splash.html","resources/**/*"],
+    "extraResources": [
+      { "from": "backend/axvon-hrms.jar", "to": "backend/axvon-hrms.jar" },
+      { "from": "frontend-dist", "to": "frontend-dist" },
+      { "from": "jre", "to": "jre" }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "resources/icon.ico",
+      "publisherName": "Athul KV"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AXVON HRMS",
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "license": "../LICENSE.txt"
+    },
+    "mac": { "target": "dmg", "icon": "resources/icon.icns", "category": "public.app-category.business" },
+    "linux": { "target": "AppImage", "icon": "resources/icon.png", "category": "Office" }
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}

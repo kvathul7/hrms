@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:480px;height:300px;background:#0F172A;border-radius:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden;position:relative;-webkit-app-region:drag}
+.g1{position:absolute;width:300px;height:300px;border-radius:50%;background:rgba(20,184,166,.12);top:-30%;right:-15%;filter:blur(60px)}
+.g2{position:absolute;width:250px;height:250px;border-radius:50%;background:rgba(59,130,246,.09);bottom:-20%;left:-10%;filter:blur(50px)}
+.ct{position:relative;z-index:1;text-align:center}
+.nm{font-size:28px;font-weight:900;color:#fff;letter-spacing:4px;margin:14px 0 5px}
+.sb{font-size:12px;color:#475569;letter-spacing:.8px;margin-bottom:6px}
+.st{font-size:12px;color:#64748B;margin-bottom:24px}
+.bar{width:200px;height:3px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;margin:0 auto 16px}
+.fill{height:100%;background:linear-gradient(90deg,#3B82F6,#14B8A6);border-radius:2px;animation:load 2.5s ease forwards;width:0}
+@keyframes load{from{width:0}to{width:100%}}
+.cr{font-size:11px;color:#334155}
+</style>
+</head>
+<body>
+<div class="g1"></div><div class="g2"></div>
+<div class="ct">
+  <svg width="70" height="70" viewBox="0 0 200 200" fill="none">
+    <defs>
+      <linearGradient id="gL" x1="30" y1="175" x2="100" y2="15" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#2563EB"/><stop offset="100%" stop-color="#60A5FA"/></linearGradient>
+      <linearGradient id="gR" x1="170" y1="175" x2="100" y2="15" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#14B8A6"/><stop offset="100%" stop-color="#2DD4BF"/></linearGradient>
+    </defs>
+    <path d="M100 15 Q95 15 90 25 L28 165 Q23 178 35 180 L58 180 Q68 180 73 168 L100 105 Z" fill="url(#gL)"/>
+    <path d="M100 15 Q105 15 110 25 L172 165 Q177 178 165 180 L142 180 Q132 180 127 168 L100 105 Z" fill="url(#gR)"/>
+    <polygon points="100,108 82,150 118,150" fill="#0F172A"/>
+  </svg>
+  <div class="nm">AXVON</div>
+  <div class="sb">ENTERPRISE HRMS PLATFORM v2.0</div>
+  <div class="st" id="st">Starting backend services...</div>
+  <div class="bar"><div class="fill"></div></div>
+  <div class="cr">Crafted by Athul KV &nbsp;·&nbsp; © 2025 AXVON</div>
+</div>
+<script>
+const msgs=['Starting backend services...','Loading database...','Initialising modules...','Almost ready...']
+let i=0;setInterval(()=>{if(i<msgs.length-1){i++;document.getElementById('st').textContent=msgs[i]}},700)
+</script>
+</body>
+</html>

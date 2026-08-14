@@ -1,0 +1,9 @@
+AXVON HRMS v2.0 - End User License Agreement
+
+Copyright © 2025 Athul KV. All rights reserved.
+
+This software is created by Athul KV (kvathul27@gmail.com).
+GitHub: github.com/kvathul7
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+Unauthorized redistribution or commercial resale is prohibited.
