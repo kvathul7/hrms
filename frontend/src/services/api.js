@@ -50,6 +50,16 @@ export const performanceAPI = {
   delete: id=>api.delete(`/performance/${id}`)
 }
 export const dashboardAPI = { stats: ()=>api.get('/dashboard/stats'), health: ()=>api.get('/dashboard/health') }
+export const userAPI = {
+  getAll: ()=>api.get('/users'),
+  create: d=>api.post('/users',d),
+  update: (id,d)=>api.put(`/users/${id}`,d),
+  resetPassword: (id,password)=>api.put(`/users/${id}/password`,{password}),
+  changeOwnPassword: (currentPassword,newPassword)=>api.put('/users/me/password',{currentPassword,newPassword}),
+  delete: id=>api.delete(`/users/${id}`)
+}
+// Reachable with no token — it is what creates the first account on a fresh install.
+export const setupAPI = { status: ()=>api.get('/setup/status'), init: d=>api.post('/setup/init',d) }
 // date → attendance day, month → payroll YYYY-MM. Both optional; backend defaults to today / current month.
 export const reportsAPI = { summary: (date,month)=>api.get('/reports/summary', { params: { date, month } }) }
 export const adminAPI = {

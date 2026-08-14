@@ -1,7 +1,7 @@
 import{useState,useEffect,useCallback}from'react'
 // The package exposes no root entry — the browser build is the one that reads a File.
 import readXlsxFile from'read-excel-file/browser'
-import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI}from'./services/api'
+import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI,userAPI,setupAPI}from'./services/api'
 
 const Logo=({size=34})=>(
   <svg width={size} height={size} viewBox="0 0 200 200" fill="none">
@@ -68,16 +68,94 @@ function Modal(){
   </div>
 }
 
+// Electron does not implement window.prompt() — it throws "prompt() is and will not
+// be supported", which is why every Admin delete silently did nothing in the desktop
+// app while working in a browser. This is the in-app replacement.
+function ConfirmPhrase({phrase,message,danger='Delete',onConfirm}){
+  const[typed,setTyped]=useState('')
+  const[busy,setBusy]=useState(false)
+  const armed=typed.trim()===phrase
+  const go=async()=>{
+    if(!armed) return
+    setBusy(true)
+    try{await onConfirm()}finally{setBusy(false)}
+  }
+  return<div>
+    <div style={{background:'#FEF2F2',border:'1px solid #FECACA',borderRadius:11,padding:'12px 15px',fontSize:13,color:'#B91C1C',lineHeight:1.6,marginBottom:14}}>{message}</div>
+    <Fld label={<>Type <b style={{fontFamily:'monospace'}}>{phrase}</b> to confirm</>}>
+      <Inp value={typed} onChange={setTyped} placeholder={phrase}/>
+    </Fld>
+    <div style={{display:'flex',justifyContent:'flex-end',gap:9,marginTop:14,paddingTop:14,borderTop:'1px solid #E2E8F0'}}>
+      <BtnO onClick={closeModal}>Cancel</BtnO>
+      <button onClick={go} disabled={!armed||busy} style={{background:armed?'#DC2626':'#FCA5A5',border:'none',borderRadius:9,padding:'9px 18px',color:'#fff',fontSize:13,fontWeight:700,cursor:armed&&!busy?'pointer':'not-allowed',fontFamily:'inherit'}}>{busy?'Working…':danger}</button>
+    </div>
+  </div>
+}
+
 const NAV=[
   {g:'Overview',items:[{id:'dashboard',l:'Dashboard',i:'📊'}]},
   {g:'Workforce',items:[{id:'employees',l:'Employees',i:'👥'},{id:'attendance',l:'Attendance',i:'🕐'},{id:'leave',l:'Leave',i:'🌴'},{id:'payroll',l:'Payroll',i:'💰'}]},
   {g:'Talent',items:[{id:'recruitment',l:'Recruitment',i:'🎯'},{id:'performance',l:'Performance',i:'⭐'}]},
   {g:'Organisation',items:[{id:'departments',l:'Departments',i:'🏢'},{id:'holidays',l:'Holidays',i:'📅'}]},
   {g:'Insights',items:[{id:'reports',l:'Reports',i:'📁'}]},
-  {g:'System',items:[{id:'bulk',l:'Bulk Import',i:'⬆'},{id:'admin',l:'Admin & Delete',i:'⚙'},{id:'about',l:'About',i:'★'}]}
+  {g:'System',items:[{id:'bulk',l:'Bulk Import',i:'⬆'},{id:'users',l:'Users & Access',i:'🔑',roles:['SUPER_ADMIN']},{id:'admin',l:'Admin & Delete',i:'⚙',roles:['SUPER_ADMIN']},{id:'about',l:'About',i:'★'}]}
 ]
+// The endpoints enforce this too — hiding the entries just avoids offering people
+// buttons that will only ever answer 403.
+const navFor=role=>NAV.map(g=>({...g,items:g.items.filter(i=>!i.roles||i.roles.includes(role))})).filter(g=>g.items.length)
 
-function Login({onLogin}){
+// Shown only while the database has no accounts at all. This is what a company sees
+// on a fresh install instead of being handed somebody else's admin password.
+function Setup({onDone}){
+  const[f,setF]=useState({fullName:'',email:'',password:'',confirm:'',loadDemoData:false})
+  const[busy,setBusy]=useState(false)
+  const[err,setErr]=useState('')
+  const submit=async()=>{
+    if(!f.fullName.trim()){setErr('Enter your name');return}
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email)){setErr('Enter a valid email address');return}
+    if(f.password.length<6){setErr('Password must be at least 6 characters');return}
+    if(f.password!==f.confirm){setErr('The two passwords do not match');return}
+    setBusy(true);setErr('')
+    try{
+      await setupAPI.init({fullName:f.fullName,email:f.email,password:f.password,loadDemoData:f.loadDemoData})
+      const r=await authAPI.login({email:f.email,password:f.password})
+      const{token,...u}=r.data
+      localStorage.setItem('axvon_token',token);localStorage.setItem('axvon_user',JSON.stringify(u))
+      toast('Welcome to AXVON')
+      onDone(u)
+    }catch(e){setErr(e.response?.data?.message||'Setup failed — is the backend running?')}
+    finally{setBusy(false)}
+  }
+  return<div style={{display:'flex',height:'100vh'}}>
+    <div style={{width:'42%',background:'#0F172A',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:48,position:'relative',overflow:'hidden'}}>
+      <div style={{position:'absolute',width:400,height:400,borderRadius:'50%',background:'rgba(20,184,166,.1)',top:'-20%',right:'-20%',filter:'blur(70px)'}}/>
+      <div style={{position:'relative',zIndex:1,width:'100%',maxWidth:330}}>
+        <div style={{display:'flex',alignItems:'center',gap:13,marginBottom:26}}><Logo size={46}/><div><div style={{fontSize:22,fontWeight:900,color:'#fff',letterSpacing:2.5}}>AXVON</div><div style={{fontSize:9,color:'#475569',marginTop:2}}>HRMS PLATFORM v2.0</div></div></div>
+        <div style={{color:'#F1F5F9',fontSize:17,fontWeight:700,marginBottom:10}}>Let's set up your workspace</div>
+        <div style={{color:'#94A3B8',fontSize:13.5,lineHeight:1.7,marginBottom:24}}>You are creating the first administrator account for this installation. Nobody else has access until you add them.</div>
+        {['🔐 Your own password — no shared defaults','👥 Add HR, managers and staff afterwards','💾 Everything stays on this computer'].map(t=><div key={t} style={{padding:'10px 14px',background:'rgba(255,255,255,.05)',borderRadius:9,border:'1px solid rgba(255,255,255,.07)',color:'#CBD5E1',fontSize:13,marginBottom:8}}>{t}</div>)}
+      </div>
+    </div>
+    <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',padding:40,background:'#F8FAFC',overflowY:'auto'}}>
+      <div style={{width:'100%',maxWidth:390}}>
+        <h2 style={{fontSize:25,fontWeight:900,marginBottom:5}}>Create admin account</h2>
+        <p style={{fontSize:13.5,color:'#64748B',marginBottom:24}}>This is a one-time step for this installation</p>
+        <Fld label="Your Full Name *"><Inp value={f.fullName} onChange={v=>setF({...f,fullName:v})} placeholder="Athul KV"/></Fld>
+        <Fld label="Work Email *"><Inp type="email" value={f.email} onChange={v=>setF({...f,email:v})} placeholder="you@company.com"/></Fld>
+        <Fld label="Password *"><Inp type="password" value={f.password} onChange={v=>setF({...f,password:v})} placeholder="at least 6 characters"/></Fld>
+        <Fld label="Confirm Password *"><Inp type="password" value={f.confirm} onChange={v=>setF({...f,confirm:v})}/></Fld>
+        <label style={{display:'flex',gap:9,alignItems:'flex-start',background:'#fff',border:'1.5px solid #E2E8F0',borderRadius:11,padding:'12px 14px',cursor:'pointer',marginBottom:14}}>
+          <input type="checkbox" checked={f.loadDemoData} onChange={e=>setF({...f,loadDemoData:e.target.checked})} style={{marginTop:2}}/>
+          <span style={{fontSize:12.5,lineHeight:1.55}}><b>Also load sample data</b><br/><span style={{color:'#64748B'}}>8 fictional employees, departments and holidays plus the four demo logins, so you can explore. Leave unticked for real company use.</span></span>
+        </label>
+        {err&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',color:'#DC2626',fontSize:13,padding:'10px 14px',borderRadius:9,marginBottom:12}}>{err}</div>}
+        <Btn onClick={submit} disabled={busy} style={{width:'100%',justifyContent:'center',padding:13,fontSize:15}}>{busy?'Setting up…':'Create Account & Continue →'}</Btn>
+      </div>
+    </div>
+  </div>
+}
+
+function Login({onLogin,showDemo}){
   const[email,setEmail]=useState('')
   const[pass,setPass]=useState('')
   const[err,setErr]=useState('')
@@ -107,12 +185,14 @@ function Login({onLogin}){
         <Inp value={pass} onChange={setPass} placeholder="Password" type="password" style={{marginBottom:12}}/>
         {err&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',color:'#DC2626',fontSize:13,padding:'10px 14px',borderRadius:9,marginBottom:12}}>{err}</div>}
         <Btn onClick={doLogin} disabled={loading} style={{width:'100%',justifyContent:'center',padding:13,fontSize:15}}>{loading?'Signing in…':'Sign In →'}</Btn>
-        <div style={{background:'#F8FAFC',border:'1.5px solid #E2E8F0',borderRadius:12,padding:14,marginTop:18}}>
+        {/* Only while the seeded demo accounts still exist — a real deployment
+            deletes them and this panel disappears with them. */}
+        {showDemo&&<div style={{background:'#F8FAFC',border:'1.5px solid #E2E8F0',borderRadius:12,padding:14,marginTop:18}}>
           <div style={{fontSize:10.5,color:'#94A3B8',fontWeight:700,textTransform:'uppercase',letterSpacing:'.7px',marginBottom:10}}>Click to fill demo credentials</div>
           {demos.map(d=><div key={d.email} onClick={()=>{setEmail(d.email);setPass(d.pass)}} style={{display:'flex',justifyContent:'space-between',padding:'8px 10px',borderRadius:8,cursor:'pointer',marginBottom:4}} onMouseOver={e=>e.currentTarget.style.background='#fff'} onMouseOut={e=>e.currentTarget.style.background=''}>
             <div><div style={{fontSize:12,fontWeight:700,color:'#14B8A6'}}>{d.role}</div><div style={{fontSize:11,color:'#94A3B8',fontFamily:'monospace'}}>{d.email} / {d.pass}</div></div>
           </div>)}
-        </div>
+        </div>}
       </div>
     </div>
   </div>
@@ -927,27 +1007,163 @@ function BulkImport(){
   </div>
 }
 
+// ── User accounts ─────────────────────────────────────────────────────
+const ROLES=[
+  ['SUPER_ADMIN','Super Admin','Everything, including accounts and data deletion'],
+  ['HR_ADMIN','HR Admin','Employees, payroll, leave, recruitment, reports'],
+  ['MANAGER','Manager','Approve leave, run reviews, view reports'],
+  ['EMPLOYEE','Employee','Day-to-day access, no administration']
+]
+const roleName=r=>(ROLES.find(x=>x[0]===r)||[r,r])[1]
+function UserForm({emps,onDone}){
+  const[f,setF]=useState({email:'',password:'',role:'EMPLOYEE',employeeId:''})
+  const[busy,setBusy]=useState(false)
+  const save=async()=>{
+    if(!f.email.trim()){toast('Email is required','warn');return}
+    if(f.password.length<6){toast('Password must be at least 6 characters','warn');return}
+    setBusy(true)
+    try{await userAPI.create({...f,employeeId:f.employeeId||null});toast('Account created');closeModal();onDone()}
+    catch(e){toast(e.response?.data?.message||'Could not create account','error')}
+    finally{setBusy(false)}
+  }
+  return<div>
+    <Fld label="Work Email *"><Inp type="email" value={f.email} onChange={v=>setF({...f,email:v})} placeholder="name@company.com"/></Fld>
+    <Fld label="Temporary Password *"><Inp type="text" value={f.password} onChange={v=>setF({...f,password:v})} placeholder="at least 6 characters"/></Fld>
+    <Fld label="Role"><Sel value={f.role} onChange={v=>setF({...f,role:v})}>{ROLES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</Sel></Fld>
+    <div style={{fontSize:12,color:'#64748B',marginTop:-6,marginBottom:12}}>{(ROLES.find(r=>r[0]===f.role)||[])[2]}</div>
+    <Fld label="Link to Employee Record"><Sel value={f.employeeId} onChange={v=>setF({...f,employeeId:v})}><option value="">— Not linked —</option>{emps.map(e=><option key={e.id} value={e.id}>{e.firstName} {e.lastName} ({e.empId})</option>)}</Sel></Fld>
+    <div style={{fontSize:12,color:'#94A3B8',marginTop:-6}}>Linking makes the app greet them by name instead of by email.</div>
+    <FormFoot onSave={save} busy={busy} label="Create Account"/>
+  </div>
+}
+function ResetPasswordForm({user,onDone}){
+  const[pw,setPw]=useState('');const[busy,setBusy]=useState(false)
+  const save=async()=>{
+    if(pw.length<6){toast('Password must be at least 6 characters','warn');return}
+    setBusy(true)
+    try{await userAPI.resetPassword(user.id,pw);toast(`Password reset for ${user.email}`,'warn');closeModal();onDone&&onDone()}
+    catch(e){toast(e.response?.data?.message||'Could not reset password','error')}
+    finally{setBusy(false)}
+  }
+  return<div>
+    <div style={{fontSize:13,color:'#64748B',marginBottom:12}}>Set a new password for <b style={{color:'#0F172A'}}>{user.email}</b>. Tell them to change it after signing in.</div>
+    <Fld label="New Password *"><Inp type="text" value={pw} onChange={setPw} placeholder="at least 6 characters"/></Fld>
+    <FormFoot onSave={save} busy={busy} label="Set Password"/>
+  </div>
+}
+function MyPasswordForm(){
+  const[f,setF]=useState({current:'',next:'',confirm:''});const[busy,setBusy]=useState(false)
+  const save=async()=>{
+    if(f.next.length<6){toast('New password must be at least 6 characters','warn');return}
+    if(f.next!==f.confirm){toast('The two new passwords do not match','warn');return}
+    setBusy(true)
+    try{await userAPI.changeOwnPassword(f.current,f.next);toast('Password changed');closeModal()}
+    catch(e){toast(e.response?.data?.message||'Could not change password','error')}
+    finally{setBusy(false)}
+  }
+  return<div>
+    <Fld label="Current Password *"><Inp type="password" value={f.current} onChange={v=>setF({...f,current:v})}/></Fld>
+    <Fld label="New Password *"><Inp type="password" value={f.next} onChange={v=>setF({...f,next:v})}/></Fld>
+    <Fld label="Confirm New Password *"><Inp type="password" value={f.confirm} onChange={v=>setF({...f,confirm:v})}/></Fld>
+    <FormFoot onSave={save} busy={busy} label="Change Password"/>
+  </div>
+}
+function Users({me}){
+  const[users,setUsers]=useState([]);const[emps,setEmps]=useState([]);const[loading,setLoading]=useState(true)
+  const load=useCallback(()=>{
+    setLoading(true)
+    Promise.all([userAPI.getAll(),employeeAPI.getAll()])
+      .then(([u,e])=>{setUsers(u.data.data||[]);setEmps(e.data.data||[])})
+      .catch(()=>toast('Could not load accounts','error'))
+      .finally(()=>setLoading(false))
+  },[])
+  useEffect(()=>{load()},[load])
+  const patch=async(u,body,what)=>{
+    try{await userAPI.update(u.id,body);toast(what);load()}
+    catch(e){toast(e.response?.data?.message||'Update failed','error')}
+  }
+  const del=u=>openModal(`Delete ${u.email}`,<ConfirmPhrase
+    phrase="DELETE ACCOUNT" danger="Delete account"
+    message={<>This removes the login <b>{u.email}</b>. Their employee record and history stay in the system — only the ability to sign in is removed.</>}
+    onConfirm={async()=>{
+      try{await userAPI.delete(u.id);toast('Account deleted','warn');closeModal();load()}
+      catch(e){toast(e.response?.data?.message||'Could not delete account','error')}
+    }}/>)
+  const stock=users.filter(u=>u.email.endsWith('@axvon.io'))
+  return<div>
+    <PH title="Users & Access" sub={`${users.length} account${users.length===1?'':'s'} · who can sign in and what they can do`}>
+      <BtnO onClick={()=>openModal('Change My Password',<MyPasswordForm/>)}>Change my password</BtnO>
+      <Btn onClick={()=>openModal('Add User Account',<UserForm emps={emps} onDone={load}/>)}>+ Add Account</Btn>
+    </PH>
+    {stock.length>0&&<Card style={{padding:'14px 18px',marginBottom:14,borderLeft:'4px solid #F59E0B'}}>
+      <div style={{fontWeight:700,fontSize:13.5,marginBottom:4}}>⚠ {stock.length} demo account{stock.length===1?'':'s'} still active</div>
+      <div style={{fontSize:12.5,color:'#64748B',lineHeight:1.6}}>
+        {stock.map(u=>u.email).join(', ')} — these ship with AXVON and their passwords are published in the documentation.
+        Create your own Super Admin account first, sign in as that, then delete these.
+      </div>
+    </Card>}
+    <Card>
+      {loading?<Spin/>:<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Account','Role','Status','Last Sign-in','Actions'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+        <tbody>{users.map(u=>{const self=me?.email===u.email;return<tr key={u.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+          <td style={{padding:'11px 14px'}}><div style={{display:'flex',alignItems:'center',gap:10}}>
+            <Av name={u.employeeName||u.email} size={30}/>
+            <div><div style={{fontWeight:600}}>{u.employeeName||u.email.split('@')[0]}{self&&<span style={{fontSize:10,fontWeight:700,color:'#14B8A6',marginLeft:6}}>YOU</span>}</div>
+            <div style={{fontSize:11,color:'#94A3B8'}}>{u.email}</div></div>
+          </div></td>
+          <td style={{padding:'11px 14px'}}>
+            <select value={u.role} onChange={e=>patch(u,{role:e.target.value},`${u.email} is now ${roleName(e.target.value)}`)} style={{...SEL,padding:'4px 8px',fontSize:12,width:'auto'}}>
+              {ROLES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
+          </td>
+          <td style={{padding:'11px 14px'}}>
+            <button onClick={()=>patch(u,{isActive:!u.isActive},u.isActive?`${u.email} deactivated`:`${u.email} reactivated`)} style={{background:u.isActive?'rgba(34,197,94,.12)':'rgba(239,68,68,.1)',color:u.isActive?'#15803D':'#B91C1C',border:'none',borderRadius:20,padding:'3px 11px',fontSize:11,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}}>
+              {u.isActive?'● Active':'○ Disabled'}
+            </button>
+          </td>
+          <td style={{padding:'11px 14px',color:'#64748B',fontSize:12}}>{u.lastLogin?new Date(u.lastLogin).toLocaleString():'never'}</td>
+          <td style={{padding:'11px 14px'}}><div style={{display:'inline-flex',gap:5}}>
+            <BtnO onClick={()=>openModal(`Reset password`,<ResetPasswordForm user={u}/>)} style={{padding:'5px 11px',fontSize:12}}>Reset password</BtnO>
+            {!self&&<BtnD onClick={()=>del(u)}>🗑</BtnD>}
+          </div></td>
+        </tr>})}
+        </tbody>
+      </table></div>}
+    </Card>
+    <Card style={{padding:'18px 20px',marginTop:14}}>
+      <div style={{fontWeight:700,marginBottom:10,fontSize:13.5}}>What each role can do</div>
+      {ROLES.map(([v,l,d])=><div key={v} style={{display:'flex',gap:12,padding:'7px 0',borderBottom:'1px solid rgba(226,232,240,.6)',fontSize:12.5}}>
+        <div style={{width:120,fontWeight:700,flexShrink:0}}>{l}</div><div style={{color:'#64748B'}}>{d}</div>
+      </div>)}
+    </Card>
+  </div>
+}
+
 function Admin(){
   const[stats,setStats]=useState(null);const[deleting,setDeleting]=useState('')
   useEffect(()=>{adminAPI.stats().then(r=>setStats(r.data.data)).catch(()=>{})},[])
   const mods=[{key:'employees',l:'Employees',i:'👥',c:'#14B8A6',fn:adminAPI.deleteEmployees},{key:'leave',l:'Leave Requests',i:'🌴',c:'#F59E0B',fn:adminAPI.deleteLeave},{key:'payroll',l:'Payroll',i:'💰',c:'#8B5CF6',fn:adminAPI.deletePayroll},{key:'candidates',l:'Candidates',i:'🎯',c:'#F97316',fn:adminAPI.deleteCandidates},{key:'holidays',l:'Holidays',i:'📅',c:'#22C55E',fn:adminAPI.deleteHolidays}]
-  const del=async(m)=>{
-    const phrase=window.prompt(`Type DELETE ${m.l.toUpperCase()} to confirm:`)
-    if(phrase!==`DELETE ${m.l.toUpperCase()}`){toast('Cancelled','warn');return}
-    setDeleting(m.key)
-    try{await m.fn();toast(`All ${m.l} deleted`,'warn');const s=await adminAPI.stats();setStats(s.data.data)}
-    catch(e){toast(e.response?.data?.message||'Error','error')}
-    finally{setDeleting('')}
-  }
-  const delAll=async()=>{
-    const phrase=window.prompt('Type DELETE_ALL_AXVON_DATA to confirm:')
-    if(phrase!=='DELETE_ALL_AXVON_DATA'){toast('Cancelled','warn');return}
-    if(!confirm('FINAL WARNING: Delete ALL data?'))return
-    setDeleting('all')
-    try{await adminAPI.deleteAll();toast('Full reset complete','warn')}
-    catch(e){toast(e.response?.data?.message||'Error','error')}
-    finally{setDeleting('')}
-  }
+  const refresh=()=>adminAPI.stats().then(s=>setStats(s.data.data)).catch(()=>{})
+  const del=m=>openModal(`Delete all ${m.l}`,<ConfirmPhrase
+    phrase={`DELETE ${m.l.toUpperCase()}`}
+    danger={`Delete all ${m.l}`}
+    message={<>This permanently removes <b>all {m.l}</b> from the database. It cannot be undone.</>}
+    onConfirm={async()=>{
+      setDeleting(m.key)
+      try{await m.fn();toast(`All ${m.l} deleted`,'warn');closeModal();await refresh()}
+      catch(e){toast(e.response?.data?.message||'Error','error')}
+      finally{setDeleting('')}
+    }}/>)
+  const delAll=()=>openModal('Full system reset',<ConfirmPhrase
+    phrase="DELETE_ALL_AXVON_DATA"
+    danger="Erase everything"
+    message={<>This deletes <b>all employees, payroll, attendance, leave, candidates and holidays</b>. User accounts are kept so you can still sign in. There is no undo and no backup.</>}
+    onConfirm={async()=>{
+      setDeleting('all')
+      try{await adminAPI.deleteAll();toast('Full reset complete','warn');closeModal();await refresh()}
+      catch(e){toast(e.response?.data?.message||'Error','error')}
+      finally{setDeleting('')}
+    }}/>)
   return<div>
     <PH title="Admin & Data Management" sub="Delete module data · Super Admin only"/>
     <div style={{background:'rgba(239,68,68,.06)',border:'1px solid rgba(239,68,68,.25)',borderRadius:12,padding:'13px 16px',marginBottom:20,display:'flex',gap:10,alignItems:'flex-start'}}>
@@ -1077,15 +1293,16 @@ function Shell({user,onLogout}){
     const t=setInterval(ping,15000)
     return()=>{alive=false;clearInterval(t)}
   },[])
-  const pages={dashboard:<Dashboard user={user}/>,employees:<Employees/>,attendance:<Attendance/>,leave:<Leave/>,payroll:<Payroll/>,recruitment:<Recruitment/>,performance:<Performance/>,departments:<Departments/>,holidays:<Holidays/>,reports:<Reports/>,bulk:<BulkImport/>,admin:<Admin/>,about:<About/>}
-  const label=NAV.flatMap(g=>g.items).find(i=>i.id===page)?.l||'Dashboard'
+  const pages={dashboard:<Dashboard user={user}/>,employees:<Employees/>,attendance:<Attendance/>,leave:<Leave/>,payroll:<Payroll/>,recruitment:<Recruitment/>,performance:<Performance/>,departments:<Departments/>,holidays:<Holidays/>,reports:<Reports/>,bulk:<BulkImport/>,users:<Users me={user}/>,admin:<Admin/>,about:<About/>}
+  const nav=navFor(user.role)
+  const label=nav.flatMap(g=>g.items).find(i=>i.id===page)?.l||'Dashboard'
   return<div style={{display:'flex',height:'100vh',overflow:'hidden'}}>
     <nav style={{width:col?62:230,background:'#0F172A',display:'flex',flexDirection:'column',flexShrink:0,transition:'width .2s',overflow:'hidden'}}>
       <div style={{padding:'16px 18px',display:'flex',alignItems:'center',gap:11,borderBottom:'1px solid rgba(255,255,255,.07)',minHeight:64,overflow:'hidden'}}>
         <Logo size={34}/>{!col&&<div><div style={{fontSize:16,fontWeight:900,color:'#fff',letterSpacing:2.5,whiteSpace:'nowrap'}}>AXVON</div><div style={{fontSize:9,color:'#475569',whiteSpace:'nowrap',marginTop:1}}>HRMS PLATFORM</div></div>}
       </div>
       <div style={{flex:1,overflowY:'auto',padding:'10px 7px'}}>
-        {NAV.map(g=><div key={g.g}>
+        {nav.map(g=><div key={g.g}>
           {!col&&<div style={{fontSize:9,fontWeight:700,color:'rgba(255,255,255,.22)',letterSpacing:1.2,textTransform:'uppercase',padding:'10px 10px 4px'}}>{g.g}</div>}
           {g.items.map(it=><button key={it.id} onClick={()=>setPage(it.id)} title={it.l} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 11px',borderRadius:9,cursor:'pointer',color:page===it.id?'#14B8A6':'#94A3B8',fontSize:13,border:'none',background:page===it.id?'rgba(20,184,166,.16)':'transparent',width:'100%',textAlign:'left',marginBottom:2,borderLeft:`2px solid ${page===it.id?'#14B8A6':'transparent'}`,fontWeight:page===it.id?700:400,fontFamily:'inherit',whiteSpace:'nowrap',overflow:'hidden',transition:'all .12s'}}>
             <span style={{fontSize:15,flexShrink:0}}>{it.i}</span>{!col&&it.l}
@@ -1096,6 +1313,9 @@ function Shell({user,onLogout}){
         <div style={{display:'flex',alignItems:'center',gap:9,padding:'9px 11px',background:'rgba(255,255,255,.05)',borderRadius:9,marginBottom:7,overflow:'hidden'}}>
           <Av name={user.name||'User'} size={28}/>{!col&&<div style={{overflow:'hidden'}}><div style={{fontSize:12,fontWeight:700,color:'#F1F5F9',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{user.name}</div><div style={{fontSize:10,color:'#64748B'}}>{user.role?.replace(/_/g,' ')}</div></div>}
         </div>
+        <button onClick={()=>openModal('Change My Password',<MyPasswordForm/>)} title="Change my password" style={{display:'flex',alignItems:'center',gap:9,padding:'9px 11px',borderRadius:9,cursor:'pointer',color:'#94A3B8',border:'none',background:'transparent',width:'100%',fontSize:13,fontFamily:'inherit',whiteSpace:'nowrap',overflow:'hidden'}}>
+          <span style={{flexShrink:0}}>🔑</span>{!col&&'Change Password'}
+        </button>
         <button onClick={onLogout} style={{display:'flex',alignItems:'center',gap:9,padding:'9px 11px',borderRadius:9,cursor:'pointer',color:'#EF4444',border:'none',background:'transparent',width:'100%',fontSize:13,fontFamily:'inherit',whiteSpace:'nowrap',overflow:'hidden'}}>
           <span style={{flexShrink:0}}>⇤</span>{!col&&'Sign Out'}
         </button>
@@ -1123,13 +1343,17 @@ function Shell({user,onLogout}){
 }
 
 export default function App(){
-  const[user,setUser]=useState(null);const[splash,setSplash]=useState(true)
+  const[user,setUser]=useState(null);const[splash,setSplash]=useState(true);const[setup,setSetup]=useState(null)
   useEffect(()=>{
     setTimeout(()=>setSplash(false),2400)
     const saved=localStorage.getItem('axvon_user')
     if(saved)try{setUser(JSON.parse(saved))}catch{}
+    // If the database has no accounts this is a fresh installation: send the operator
+    // to setup rather than a login screen nobody has a password for.
+    setupAPI.status().then(r=>setSetup(r.data.data)).catch(()=>setSetup({initialized:true,demoAccounts:false}))
   },[])
   const logout=()=>{localStorage.clear();setUser(null)}
+  const afterSetup=u=>{setSetup(s=>({...s,initialized:true}));setUser(u)}
   return<>
     <Toasts/><Modal/>
     {splash&&<div style={{position:'fixed',inset:0,background:'#0F172A',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:9999,transition:'opacity .5s'}}>
@@ -1139,6 +1363,9 @@ export default function App(){
       <div style={{width:220,height:3,background:'rgba(255,255,255,.1)',borderRadius:2,marginTop:28,overflow:'hidden'}}><div style={{height:'100%',background:'linear-gradient(90deg,#3B82F6,#14B8A6)',borderRadius:2,animation:'spl 2.1s ease forwards'}}/></div>
       <div style={{position:'absolute',bottom:24,fontSize:12,color:'#334155'}}>Crafted by Athul KV · AXVON HRMS v2.0 · © 2025</div>
     </div>}
-    {!user?<Login onLogin={setUser}/>:<Shell user={user} onLogout={logout}/>}
+    {!setup?null
+     :!setup.initialized?<Setup onDone={afterSetup}/>
+     :!user?<Login onLogin={setUser} showDemo={setup.demoAccounts}/>
+     :<Shell user={user} onLogout={logout}/>}
   </>
 }

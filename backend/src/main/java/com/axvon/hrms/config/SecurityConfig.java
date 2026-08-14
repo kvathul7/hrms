@@ -24,7 +24,9 @@ public class SecurityConfig {
     @Bean public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http.cors(c->c.configurationSource(corsSource())).csrf(c->c.disable())
             .sessionManagement(s->s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .authorizeHttpRequests(a->a.requestMatchers("/auth/**","/public/**").permitAll().anyRequest().authenticated())
+            // /setup/** must be reachable with no account, since it is what creates the
+            // first one. Both endpoints refuse to do anything once a user exists.
+            .authorizeHttpRequests(a->a.requestMatchers("/auth/**","/public/**","/setup/**").permitAll().anyRequest().authenticated())
             // Missing/expired/invalid token must be 401, not the default 403 — the frontend
             // interceptor keys off 401 to clear the session and bounce back to login.
             // A genuine role denial still falls through to 403.

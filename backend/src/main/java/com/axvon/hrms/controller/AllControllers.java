@@ -3,12 +3,15 @@ package com.axvon.hrms.controller;
 import com.axvon.hrms.dto.*;
 import com.axvon.hrms.entity.*;
 import com.axvon.hrms.repository.*;
+import com.axvon.hrms.config.DataInitializer;
 import com.axvon.hrms.security.JwtUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.authentication.*;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import java.math.BigDecimal;
@@ -35,7 +38,12 @@ class AuthController {
             String token=jwtUtil.generate(user.getEmail(),user.getRole().name());
             return ResponseEntity.ok(AuthResponse.builder().token(token).email(user.getEmail())
                 .role(user.getRole().name()).name(name).userId(user.getId()).message("Login successful").build());
-        } catch(BadCredentialsException e) {
+        } catch(DisabledException e) {
+            // A deactivated account is not a wrong password — say so, and still 401 so
+            // the frontend clears the session rather than treating it as a role denial.
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(AuthResponse.builder().message("This account has been deactivated. Contact your administrator.").build());
+        } catch(AuthenticationException e) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                 .body(AuthResponse.builder().message("Invalid credentials").build());
         }
@@ -50,6 +58,190 @@ class AuthController {
             .findFirst().map(Employee::getFullName).orElse(user.getEmail().split("@")[0]);
         return ResponseEntity.ok(AuthResponse.builder().email(user.getEmail())
             .role(user.getRole().name()).name(name).userId(user.getId()).build());
+    }
+}
+
+// ── USER ACCOUNTS ─────────────────────────────────────────────────────
+// A company needs to create its own HR, manager and staff logins — before this
+// the only accounts that ever existed were the four seeded demo ones.
+@RestController @RequestMapping("/users") @RequiredArgsConstructor @Slf4j
+class UserController {
+    private final UserRepository userRepo;
+    private final EmployeeRepository empRepo;
+    private final PasswordEncoder encoder;
+
+    private static String str(Object v){
+        if(v==null) return null;
+        String s=v.toString().trim();
+        return s.isEmpty()?null:s;
+    }
+
+    private Map<String,Object> view(User u,List<Employee> emps){
+        Map<String,Object> m=new LinkedHashMap<>();
+        m.put("id",u.getId()); m.put("email",u.getEmail()); m.put("role",u.getRole().name());
+        m.put("isActive",u.getIsActive()); m.put("lastLogin",u.getLastLogin()); m.put("createdAt",u.getCreatedAt());
+        emps.stream().filter(e->e.getUser()!=null&&e.getUser().getId().equals(u.getId())).findFirst()
+            .ifPresent(e->{m.put("employeeId",e.getId()); m.put("employeeName",e.getFullName());});
+        return m;
+    }
+
+    // Never let the last way into the system disappear — no deleting, disabling or
+    // demoting the only remaining active Super Admin.
+    private void guardLastAdmin(User target,User.Role newRole,Boolean newActive){
+        boolean stillAdmin=(newRole==null?target.getRole():newRole)==User.Role.SUPER_ADMIN
+                        && (newActive==null?Boolean.TRUE.equals(target.getIsActive()):newActive);
+        if(stillAdmin) return;
+        long others=userRepo.findAll().stream()
+            .filter(u->!u.getId().equals(target.getId()))
+            .filter(u->u.getRole()==User.Role.SUPER_ADMIN&&Boolean.TRUE.equals(u.getIsActive()))
+            .count();
+        if(others==0) throw new IllegalArgumentException("This is the only active Super Admin — create another one first");
+    }
+
+    @GetMapping @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')")
+    public ResponseEntity<ApiResponse<List<Map<String,Object>>>> all(){
+        List<Employee> emps=empRepo.findAll();
+        return ResponseEntity.ok(ApiResponse.ok(userRepo.findAll().stream().map(u->view(u,emps)).toList()));
+    }
+
+    @PostMapping @PreAuthorize("hasRole('SUPER_ADMIN')") @Transactional
+    public ResponseEntity<ApiResponse<Map<String,Object>>> create(@RequestBody Map<String,Object> b){
+        String email=str(b.get("email")), password=str(b.get("password")), role=str(b.get("role"));
+        if(email==null||!email.matches("[^@\\s]+@[^@\\s]+\\.[^@\\s]+")) throw new IllegalArgumentException("A valid email address is required");
+        if(password==null||password.length()<6) throw new IllegalArgumentException("Password must be at least 6 characters");
+        if(userRepo.existsByEmail(email.toLowerCase())) throw new IllegalArgumentException("An account with that email already exists");
+        User.Role r;
+        try{ r=User.Role.valueOf(role==null?"EMPLOYEE":role); }
+        catch(Exception e){ throw new IllegalArgumentException("Unknown role: "+role); }
+        User u=userRepo.save(User.builder().email(email.toLowerCase()).password(encoder.encode(password))
+            .role(r).isActive(true).build());
+        linkEmployee(b.get("employeeId"),u);
+        log.info("ADMIN: created account {} ({})",u.getEmail(),r);
+        return ResponseEntity.ok(ApiResponse.ok("Account created",view(u,empRepo.findAll())));
+    }
+
+    @PutMapping("/{id}") @PreAuthorize("hasRole('SUPER_ADMIN')") @Transactional
+    public ResponseEntity<ApiResponse<Map<String,Object>>> update(@PathVariable Long id,@RequestBody Map<String,Object> b){
+        User u=userRepo.findById(id).orElseThrow();
+        User.Role newRole=null;
+        if(b.get("role")!=null){
+            try{ newRole=User.Role.valueOf(b.get("role").toString()); }
+            catch(Exception e){ throw new IllegalArgumentException("Unknown role: "+b.get("role")); }
+        }
+        Boolean newActive=b.get("isActive")==null?null:Boolean.valueOf(b.get("isActive").toString());
+        guardLastAdmin(u,newRole,newActive);
+        if(newRole!=null) u.setRole(newRole);
+        if(newActive!=null) u.setIsActive(newActive);
+        userRepo.save(u);
+        if(b.containsKey("employeeId")) linkEmployee(b.get("employeeId"),u);
+        return ResponseEntity.ok(ApiResponse.ok("Account updated",view(u,empRepo.findAll())));
+    }
+
+    @PutMapping("/{id}/password") @PreAuthorize("hasRole('SUPER_ADMIN')")
+    public ResponseEntity<ApiResponse<Void>> resetPassword(@PathVariable Long id,@RequestBody Map<String,Object> b){
+        String pw=str(b.get("password"));
+        if(pw==null||pw.length()<6) throw new IllegalArgumentException("Password must be at least 6 characters");
+        User u=userRepo.findById(id).orElseThrow();
+        u.setPassword(encoder.encode(pw)); userRepo.save(u);
+        log.warn("ADMIN: password reset for {}",u.getEmail());
+        return ResponseEntity.ok(ApiResponse.ok("Password updated",null));
+    }
+
+    // Anyone may change their own password, and must prove they know the current one.
+    @PutMapping("/me/password")
+    public ResponseEntity<ApiResponse<Void>> changeOwnPassword(org.springframework.security.core.Authentication auth,@RequestBody Map<String,Object> b){
+        if(auth==null) return ResponseEntity.status(401).build();
+        String current=str(b.get("currentPassword")), next=str(b.get("newPassword"));
+        if(next==null||next.length()<6) throw new IllegalArgumentException("New password must be at least 6 characters");
+        User u=userRepo.findByEmail(auth.getName()).orElseThrow();
+        if(current==null||!encoder.matches(current,u.getPassword()))
+            throw new IllegalArgumentException("Current password is incorrect");
+        u.setPassword(encoder.encode(next)); userRepo.save(u);
+        return ResponseEntity.ok(ApiResponse.ok("Password changed",null));
+    }
+
+    @DeleteMapping("/{id}") @PreAuthorize("hasRole('SUPER_ADMIN')") @Transactional
+    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable Long id,org.springframework.security.core.Authentication auth){
+        User u=userRepo.findById(id).orElseThrow();
+        if(auth!=null&&u.getEmail().equalsIgnoreCase(auth.getName()))
+            throw new IllegalArgumentException("You cannot delete the account you are signed in with");
+        guardLastAdmin(u,null,false);
+        // Employees hold the FK to users, so detach them or the delete fails.
+        List<Employee> linked=empRepo.findAll().stream()
+            .filter(e->e.getUser()!=null&&e.getUser().getId().equals(id)).toList();
+        linked.forEach(e->e.setUser(null));
+        empRepo.saveAll(linked);
+        userRepo.deleteById(id);
+        log.warn("ADMIN: deleted account {}",u.getEmail());
+        return ResponseEntity.ok(ApiResponse.ok("Account deleted",null));
+    }
+
+    private void linkEmployee(Object employeeId,User u){
+        // One employee record per account: clear any previous holder first.
+        List<Employee> current=empRepo.findAll().stream()
+            .filter(e->e.getUser()!=null&&e.getUser().getId().equals(u.getId())).toList();
+        current.forEach(e->e.setUser(null));
+        empRepo.saveAll(current);
+        String id=str(employeeId);
+        if(id==null) return;
+        Employee target=empRepo.findById(Long.valueOf(id)).orElseThrow(()->new IllegalArgumentException("Employee not found"));
+        // Refuse to quietly move an employee record off somebody else's login.
+        if(target.getUser()!=null&&!target.getUser().getId().equals(u.getId()))
+            throw new IllegalArgumentException(target.getFullName()+" is already linked to "+target.getUser().getEmail());
+        target.setUser(u);
+        empRepo.save(target);
+    }
+}
+
+// ── FIRST-RUN SETUP ───────────────────────────────────────────────────
+// Open before any account exists, closed forever after. This is what replaces
+// shipping every installation with the same admin@axvon.io / admin123.
+@RestController @RequestMapping("/setup") @RequiredArgsConstructor @Slf4j
+class SetupController {
+    private final UserRepository userRepo;
+    private final EmployeeRepository empRepo;
+    private final PasswordEncoder encoder;
+    private final DataInitializer demoData;
+
+    private static String str(Object v){
+        if(v==null) return null;
+        String s=v.toString().trim();
+        return s.isEmpty()?null:s;
+    }
+
+    @GetMapping("/status")
+    public ResponseEntity<ApiResponse<Map<String,Object>>> status(){
+        Map<String,Object> m=new LinkedHashMap<>();
+        m.put("initialized",userRepo.count()>0);
+        // Drives whether the login screen offers the demo credentials at all.
+        m.put("demoAccounts",userRepo.existsByEmail("admin@axvon.io"));
+        return ResponseEntity.ok(ApiResponse.ok(m));
+    }
+
+    @PostMapping("/init") @Transactional
+    public ResponseEntity<ApiResponse<Map<String,Object>>> init(@RequestBody Map<String,Object> b){
+        if(userRepo.count()>0)
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.error("AXVON is already set up — please sign in"));
+        String email=str(b.get("email")), password=str(b.get("password")), fullName=str(b.get("fullName"));
+        if(email==null||!email.matches("[^@\\s]+@[^@\\s]+\\.[^@\\s]+")) throw new IllegalArgumentException("A valid email address is required");
+        if(password==null||password.length()<6) throw new IllegalArgumentException("Password must be at least 6 characters");
+        boolean withDemo=Boolean.parseBoolean(String.valueOf(b.getOrDefault("loadDemoData",false)));
+        if(withDemo) demoData.seedDemoData();
+        User admin=userRepo.save(User.builder().email(email.toLowerCase()).password(encoder.encode(password))
+            .role(User.Role.SUPER_ADMIN).isActive(true).build());
+        // Give the owner an employee record too, so the app greets them by name.
+        if(!empRepo.existsByEmail(email.toLowerCase())){
+            String[] parts=(fullName==null?email.split("@")[0]:fullName).trim().split("\\s+",2);
+            empRepo.save(Employee.builder()
+                .empId(String.format("AXV%03d",empRepo.count()+1))
+                .user(admin).firstName(parts[0]).lastName(parts.length>1?parts[1]:"—")
+                .email(email.toLowerCase()).designation("Administrator")
+                .joinDate(LocalDate.now()).status(Employee.Status.Active).build());
+        }
+        log.warn("AXVON: first-run setup completed by {} (demo data: {})",admin.getEmail(),withDemo);
+        Map<String,Object> out=new LinkedHashMap<>();
+        out.put("email",admin.getEmail()); out.put("demoDataLoaded",withDemo);
+        return ResponseEntity.ok(ApiResponse.ok("Setup complete",out));
     }
 }
 

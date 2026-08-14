@@ -15,13 +15,20 @@ public class DataInitializer {
     private final EmployeeRepository empRepo;
     private final HolidayRepository holRepo;
     private final PasswordEncoder encoder;
-    // @PostConstruct, not CommandLineRunner: runners fire AFTER the web server starts
-    // accepting connections, so a fast first login could land mid-seed and see a
-    // half-populated database (users saved, employees not yet).
+    // Demo data is no longer forced on every installation — a company that installs
+    // AXVON creates its own admin through /api/setup/init and starts clean. This
+    // only reports what the database already holds.
     @PostConstruct
-    public void run() {
-        if(userRepo.count()>0){log.info("AXVON: Data exists, skipping seed");return;}
-        log.info("AXVON: First launch - seeding demo data...");
+    public void report() {
+        if(userRepo.count()>0) log.info("AXVON: existing database with {} account(s)",userRepo.count());
+        else log.info("AXVON: empty database — waiting for first-run setup");
+    }
+
+    // Called by /api/setup/init when the operator ticks "load sample data", and by
+    // nothing else. Seeds the four demo logins plus a fictional company to explore.
+    public void seedDemoData() {
+        if(userRepo.count()>0){log.info("AXVON: accounts already exist, skipping demo seed");return;}
+        log.info("AXVON: seeding demo data on request...");
         // Departments
         Department eng=deptRepo.save(Department.builder().name("Engineering").headOfDept("Priya Sharma").description("Software development").build());
         Department hr=deptRepo.save(Department.builder().name("HR").headOfDept("Sunita Rao").description("Human resources").build());
