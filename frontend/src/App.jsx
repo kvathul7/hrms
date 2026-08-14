@@ -1,4 +1,6 @@
 import{useState,useEffect,useCallback}from'react'
+// The package exposes no root entry — the browser build is the one that reads a File.
+import readXlsxFile from'read-excel-file/browser'
 import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI}from'./services/api'
 
 const Logo=({size=34})=>(
@@ -651,82 +653,277 @@ function Reports(){
   </div>
 }
 
+// ── Bulk import ───────────────────────────────────────────────────────
+// The importable columns now cover everything the API accepts, so one spreadsheet
+// can carry salary, join date and department — not just names.
+const IMPORT_MODS={
+  employees:{fields:['empId','firstName','lastName','email','phone','designation','department','location','joinDate','basicSalary','status','gender','manager'],
+    req:['firstName','lastName','email'],
+    sample:['AXV101','Ravi','Kumar','ravi.kumar@axvon.io','9876543220','Senior Developer','Engineering','Bengaluru','2024-06-01','45000','Active','Male','Priya Sharma']},
+  holidays:{fields:['name','holidayDate','type'],req:['name','holidayDate'],
+    sample:['Dussehra','2025-10-02','Festival']},
+  candidates:{fields:['fullName','email','phone','appliedFor','department','source','stage','status'],req:['fullName','appliedFor'],
+    sample:['Vikash Tiwari','vikash@mail.com','9876500000','Backend Developer','Engineering','LinkedIn','Applied','In_Progress']}
+}
+const flabel=f=>f.replace(/([A-Z])/g,' $1').replace(/^./,c=>c.toUpperCase())
+const norm=s=>String(s??'').toLowerCase().replace(/[^a-z0-9]/g,'')
+// Real spreadsheets never use our exact field names — "DOJ", "Joining Date" and
+// "joinDate" all mean the same column. Match on a normalised header instead of
+// trusting column order.
+const ALIAS={employeeid:['empId'],empid:['empId'],staffid:['empId'],idno:['empId'],
+  givenname:['firstName'],surname:['lastName'],familyname:['lastName'],
+  emailaddress:['email'],mailid:['email'],mail:['email'],
+  mobile:['phone'],mobilenumber:['phone'],contact:['phone'],contactnumber:['phone'],phonenumber:['phone'],
+  role:['designation'],jobtitle:['designation'],title:['designation'],position:['designation','appliedFor'],
+  dept:['department'],city:['location'],office:['location'],branch:['location'],
+  joiningdate:['joinDate'],dateofjoining:['joinDate'],doj:['joinDate'],
+  salary:['basicSalary'],basic:['basicSalary'],basicpay:['basicSalary'],monthlysalary:['basicSalary'],
+  reportingmanager:['manager'],managername:['manager'],reportsto:['manager'],
+  date:['holidayDate'],holiday:['name'],occasion:['name'],
+  candidatename:['fullName'],appliedrole:['appliedFor'],appliedposition:['appliedFor'],vacancy:['appliedFor']}
+const fieldFor=(cell,fields)=>{
+  const n=norm(cell)
+  const direct=fields.find(f=>norm(f)===n)
+  if(direct) return direct
+  return (ALIAS[n]||[]).find(f=>fields.includes(f))||null
+}
+// Excel exports quote any cell containing a comma, so a naive split on "," tears
+// "Kumar, Ravi" in half.
+const splitRow=(line,sep)=>{
+  const out=[];let cur='',q=false
+  for(let i=0;i<line.length;i++){
+    const c=line[i]
+    if(q){ if(c==='"'){ if(line[i+1]==='"'){cur+='"';i++} else q=false } else cur+=c }
+    else if(c==='"') q=true
+    else if(c===sep){ out.push(cur);cur='' }
+    else cur+=c
+  }
+  out.push(cur)
+  return out.map(s=>s.trim())
+}
+const textToGrid=t=>{
+  const lines=String(t||'').replace(/\r/g,'').split('\n').filter(l=>l.trim())
+  const sep=lines.some(l=>l.includes('\t'))?'\t':','
+  return lines.map(l=>splitRow(l,sep))
+}
+const pad2=n=>String(n).padStart(2,'0')
+// null = cell was empty, undefined = present but unreadable (becomes a warning).
+const toISODate=v=>{
+  if(v instanceof Date&&!isNaN(v)) return `${v.getUTCFullYear()}-${pad2(v.getUTCMonth()+1)}-${pad2(v.getUTCDate())}`
+  const s=String(v??'').trim()
+  if(!s) return null
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const dmy=s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/)
+  if(dmy) return `${dmy[3]}-${pad2(dmy[2])}-${pad2(dmy[1])}`
+  const d=new Date(s)
+  return isNaN(d)?undefined:`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
+}
+const toNum=v=>{
+  const s=String(v??'').replace(/[₹,\s]/g,'')
+  if(!s) return null
+  const n=Number(s)
+  return isNaN(n)?undefined:n
+}
+const pickEnum=(v,opts)=>{
+  const n=norm(v)
+  if(!n) return null
+  return opts.find(o=>norm(o)===n)
+}
+const EMP_STATUS=['Active','On_Leave','Inactive','Terminated']
+function validateRow(raw,mod,deptByName){
+  const errs=[],warns=[],out={}
+  const copy=ks=>ks.forEach(k=>{const v=String(raw[k]??'').trim();if(v)out[k]=v})
+  if(mod==='employees'){
+    copy(['empId','firstName','lastName','email','phone','designation','location','manager'])
+    if(!out.firstName||!out.lastName||!out.email) errs.push('first name, last name and email are all required')
+    else if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(out.email)) errs.push(`"${out.email}" is not a valid email address`)
+    if(String(raw.joinDate??'').trim()||raw.joinDate instanceof Date){
+      const d=toISODate(raw.joinDate)
+      if(d===undefined) warns.push(`join date "${raw.joinDate}" not understood — left blank`); else if(d) out.joinDate=d
+    }
+    if(String(raw.basicSalary??'').trim()){
+      const n=toNum(raw.basicSalary)
+      if(n===undefined) warns.push(`salary "${raw.basicSalary}" is not a number — left blank`); else if(n!==null) out.basicSalary=n
+    }
+    if(String(raw.status??'').trim()){
+      const s=pickEnum(raw.status,EMP_STATUS)
+      if(!s) warns.push(`status "${raw.status}" unknown — will default to Active`); else out.status=s
+    }
+    if(String(raw.gender??'').trim()){
+      const g=pickEnum(raw.gender,['Male','Female','Other'])
+      if(!g) warns.push(`gender "${raw.gender}" unknown — left blank`); else out.gender=g
+    }
+    if(String(raw.department??'').trim()){
+      const id=deptByName[norm(raw.department)]
+      if(!id) warns.push(`department "${raw.department}" does not exist — imported unassigned`); else out.departmentId=id
+    }
+  }else if(mod==='holidays'){
+    copy(['name'])
+    if(!out.name) errs.push('holiday name is required')
+    const d=toISODate(raw.holidayDate)
+    if(d===undefined) errs.push(`date "${raw.holidayDate}" not understood`)
+    else if(!d) errs.push('date is required')
+    else out.holidayDate=d
+    if(String(raw.type??'').trim()){
+      const t=pickEnum(raw.type,['National','Festival','Optional'])
+      if(!t) warns.push(`type "${raw.type}" unknown — left blank`); else out.type=t
+    }
+    out.isActive=true
+  }else{
+    copy(['fullName','email','phone','appliedFor','department','source'])
+    if(!out.fullName) errs.push('candidate name is required')
+    if(!out.appliedFor) errs.push('applied-for role is required')
+    if(String(raw.stage??'').trim()) out.stage=String(raw.stage).trim().replace(/\s+/g,'_')
+    if(String(raw.status??'').trim()) out.status=String(raw.status).trim().replace(/\s+/g,'_')
+  }
+  return{raw,out,errs,warns}
+}
 function BulkImport(){
-  const[mod,setMod]=useState('employees');const[text,setText]=useState('');const[rows,setRows]=useState([]);const[errors,setErrors]=useState({});const[importing,setImporting]=useState(false);const[done,setDone]=useState(null)
-  const MODS={employees:{fields:['firstName','lastName','email','phone','designation','location'],req:['firstName','lastName','email'],sample:'Ravi\tKumar\travi@co.com\t9876543220\tDeveloper\tBengaluru'},holidays:{fields:['name','holidayDate','type'],req:['name','holidayDate'],sample:'Dussehra\t2025-10-02\tFestival'},candidates:{fields:['fullName','appliedFor','department','source','stage'],req:['fullName','appliedFor'],sample:'Vikash Tiwari\tBackend Developer\tEngineering\tLinkedIn\tApplied'}}
-  const m=MODS[mod]||MODS.employees
+  const[mod,setMod]=useState('employees');const[text,setText]=useState('');const[rows,setRows]=useState([]);const[importing,setImporting]=useState(false);const[done,setDone]=useState(null);const[depts,setDepts]=useState([])
+  useEffect(()=>{departmentAPI.getAll().then(r=>setDepts(r.data.data||[])).catch(()=>setDepts([]))},[])
+  const deptByName=Object.fromEntries(depts.map(d=>[norm(d.name),d.id]))
+  const m=IMPORT_MODS[mod]||IMPORT_MODS.employees
+  const gridToRows=grid=>{
+    if(!grid.length) return []
+    const mapped=grid[0].map(c=>fieldFor(c,m.fields))
+    const hasHeader=mapped.filter(Boolean).length>=2
+    const header=hasHeader?mapped:null
+    const body=(hasHeader?grid.slice(1):grid).filter(cells=>cells.some(c=>String(c??'').trim()))
+    const out=body.map(cells=>{
+      const raw={}
+      cells.forEach((c,i)=>{const f=header?header[i]:m.fields[i];if(f)raw[f]=typeof c==='string'?c.trim():c})
+      return validateRow(raw,mod,deptByName)
+    })
+    // A repeated email fails at the database anyway — flag it here so the row can be
+    // fixed before the import instead of showing up as a server-side failure.
+    const seen={}
+    out.forEach(r=>{
+      const key=norm(r.out.email)
+      if(!key) return
+      if(seen[key]) r.errs.push(`duplicate email in this file (also row ${seen[key]})`)
+      else seen[key]=out.indexOf(r)+1
+    })
+    return out
+  }
   const parse=()=>{
-    if(!text.trim()){toast('Paste data first','error');return}
-    const parsed=text.trim().split('\n').filter(l=>l.trim()).map(line=>{const cells=line.split(/[\t,]/).map(c=>c.trim());const row={};(m.fields||[]).forEach((f,i)=>{row[f]=cells[i]||''});return row})
-    const errs={};parsed.forEach((r,i)=>{(m.req||[]).forEach(f=>{if(!r[f])errs[i]='Missing: '+f})})
-    setRows(parsed);setErrors(errs);setDone(null)
+    if(!text.trim()){toast('Paste data or upload a file first','error');return}
+    const parsed=gridToRows(textToGrid(text))
+    if(!parsed.length){toast('No data rows found','warn');return}
+    setRows(parsed);setDone(null)
+  }
+  const loadFile=async f=>{
+    if(!f) return
+    try{
+      if(/\.xlsx$/i.test(f.name)){
+        // read-excel-file 9.x resolves to [{sheet,data}]; older versions resolved to
+        // the rows themselves. Accept either, and skip leading empty sheets.
+        const book=await readXlsxFile(f)
+        const grid=Array.isArray(book[0])?book:(book.find(s=>s?.data?.length)?.data||[])
+        if(!grid.length){toast('That workbook has no data rows','warn');return}
+        const parsed=gridToRows(grid)
+        setText(grid.map(r=>r.map(c=>c instanceof Date?toISODate(c):String(c??'')).join('\t')).join('\n'))
+        setRows(parsed);setDone(null)
+        toast(`${f.name} — ${parsed.length} rows read`,'info')
+      }else if(/\.xls$/i.test(f.name)){
+        toast('Old .xls format is not supported — open it in Excel and Save As .xlsx or CSV','warn')
+      }else{
+        const txt=await f.text()
+        setText(txt)
+        const parsed=gridToRows(textToGrid(txt))
+        setRows(parsed);setDone(null)
+        toast(`${f.name} — ${parsed.length} rows read`,'info')
+      }
+    }catch(err){toast('Could not read that file — is it a valid spreadsheet?','error')}
   }
   const doImport=async()=>{
-    const valid=rows.filter((_,i)=>!errors[i])
-    if(!valid.length){toast('No valid rows','error');return}
+    const valid=rows.filter(r=>!r.errs.length)
+    if(!valid.length){toast('No valid rows to import','error');return}
     setImporting(true)
     try{
-      if(mod==='employees')await employeeAPI.bulkImport(valid)
-      else if(mod==='holidays')await Promise.all(valid.map(h=>holidayAPI.create({...h,holidayDate:h.holidayDate})))
-      else if(mod==='candidates')await Promise.all(valid.map(c=>candidateAPI.create(c)))
-      setDone(valid.length);toast(`${valid.length} ${mod} imported!`)
-      setRows([]);setText('');setErrors({})
+      let result
+      if(mod==='employees'){
+        // The server re-checks every row; report what it actually saved rather than
+        // assuming the whole batch went in.
+        const r=await employeeAPI.bulkImport(valid.map(v=>v.out))
+        const d=r.data.data||{}
+        result={imported:d.imported??0,failed:d.failed??0,errors:d.errors||[]}
+      }else{
+        const calls=valid.map(v=>mod==='holidays'?holidayAPI.create(v.out):candidateAPI.create(v.out))
+        const settled=await Promise.allSettled(calls)
+        const failures=settled.filter(s=>s.status==='rejected').map(s=>s.reason?.response?.data?.message||'could not be saved')
+        result={imported:settled.length-failures.length,failed:failures.length,errors:failures}
+      }
+      setDone(result)
+      if(result.failed) toast(`${result.imported} imported, ${result.failed} rejected`,'warn')
+      else{toast(`${result.imported} ${mod} imported!`);setRows([]);setText('')}
     }catch(e){toast(e.response?.data?.message||'Import failed','error')}
     finally{setImporting(false)}
   }
-  const ok=rows.filter((_,i)=>!errors[i]).length;const errCount=Object.keys(errors).length
+  const ok=rows.filter(r=>!r.errs.length).length
+  const errCount=rows.filter(r=>r.errs.length).length
+  const warnCount=rows.filter(r=>!r.errs.length&&r.warns.length).length
   return<div>
-    <PH title="Bulk Import" sub="Upload a CSV file or paste rows copied from Excel"/>
+    <PH title="Bulk Import" sub="Upload an Excel (.xlsx) or CSV file, or paste rows straight from a spreadsheet"/>
     <div style={{display:'flex',gap:7,marginBottom:16,flexWrap:'wrap'}}>
-      {Object.keys(MODS).map(k=><button key={k} onClick={()=>{setMod(k);setRows([]);setErrors({});setDone(null);setText('')}} style={{padding:'6px 14px',borderRadius:20,fontSize:12,fontWeight:600,cursor:'pointer',border:'1px solid',background:mod===k?'#0F172A':'transparent',borderColor:mod===k?'#0F172A':'#E2E8F0',color:mod===k?'#fff':'#64748B',fontFamily:'inherit',textTransform:'capitalize'}}>{k}</button>)}
+      {Object.keys(IMPORT_MODS).map(k=><button key={k} onClick={()=>{setMod(k);setRows([]);setDone(null);setText('')}} style={{padding:'6px 14px',borderRadius:20,fontSize:12,fontWeight:600,cursor:'pointer',border:'1px solid',background:mod===k?'#0F172A':'transparent',borderColor:mod===k?'#0F172A':'#E2E8F0',color:mod===k?'#fff':'#64748B',fontFamily:'inherit',textTransform:'capitalize'}}>{k}</button>)}
     </div>
     <Card style={{padding:'18px 20px',marginBottom:14}}>
-      <div style={{fontWeight:700,marginBottom:4}}>Columns: <span style={{fontWeight:400,color:'#64748B',fontSize:13}}>{m.fields?.join(' · ')}</span></div>
-      <div style={{fontSize:12,color:'#94A3B8',marginBottom:10}}>Required: {m.req?.join(', ')} · Separate by tab or comma</div>
-      <div style={{display:'flex',gap:9,marginBottom:10}}>
-        <label style={{background:'rgba(59,130,246,.1)',border:'1px solid rgba(59,130,246,.25)',borderRadius:8,padding:'6px 13px',cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:'inherit',color:'#1D4ED8'}}>⬆ Upload CSV
-          <input type="file" accept=".csv,.tsv,.txt" style={{display:'none'}} onChange={e=>{
-            const f=e.target.files[0];if(!f)return
-            const rd=new FileReader()
-            rd.onload=ev=>{
-              let lines=String(ev.target.result||'').replace(/\r/g,'').split('\n').filter(l=>l.trim())
-              // drop a header row if it matches the expected column names
-              if(lines.length&&m.fields&&lines[0].toLowerCase().replace(/[^a-z,\t]/g,'').includes(m.fields[0].toLowerCase()))lines=lines.slice(1)
-              setText(lines.join('\n'));toast(`${f.name} loaded — click Preview & Validate`,'info')
-            }
-            rd.onerror=()=>toast('Could not read file','error')
-            rd.readAsText(f);e.target.value=''
-          }}/>
-        </label>
-        <button onClick={()=>setText(m.sample||'')} style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:8,padding:'6px 13px',cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:'inherit'}}>📋 Load sample</button>
-        <button onClick={()=>{const blob=new Blob([(m.fields||[]).join(',')],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`axvon_${mod}_template.csv`;a.click()}} style={{background:'rgba(34,197,94,.1)',border:'1px solid rgba(34,197,94,.25)',borderRadius:8,padding:'6px 13px',cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:'inherit',color:'#15803D'}}>⬇ Template</button>
+      <div style={{fontWeight:700,marginBottom:5}}>Columns <span style={{fontWeight:400,color:'#64748B',fontSize:12.5}}>— a header row is matched by name, so column order does not matter</span></div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:8}}>
+        {m.fields.map(f=><span key={f} style={{fontSize:11,fontWeight:600,padding:'3px 9px',borderRadius:20,background:m.req.includes(f)?'rgba(20,184,166,.12)':'#F1F5F9',color:m.req.includes(f)?'#0F766E':'#64748B'}}>{flabel(f)}{m.req.includes(f)?' *':''}</span>)}
       </div>
-      <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Paste from Excel or type here…" style={{width:'100%',minHeight:100,border:'1.5px solid #E2E8F0',borderRadius:9,padding:'10px 12px',fontSize:12,fontFamily:'monospace',outline:'none',resize:'vertical',lineHeight:1.5}}/>
-      <div style={{display:'flex',gap:9,marginTop:10}}><Btn onClick={parse}>👁 Preview & Validate</Btn><BtnO onClick={()=>{setText('');setRows([]);setErrors({});setDone(null)}}>Clear</BtnO></div>
+      <div style={{fontSize:12,color:'#94A3B8',marginBottom:10}}>* required · dates as YYYY-MM-DD or DD/MM/YYYY · PDF cannot be imported — export the table to Excel or CSV first</div>
+      <div style={{display:'flex',gap:9,marginBottom:10,flexWrap:'wrap'}}>
+        <label style={{background:'rgba(59,130,246,.1)',border:'1px solid rgba(59,130,246,.25)',borderRadius:8,padding:'6px 13px',cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:'inherit',color:'#1D4ED8'}}>⬆ Upload Excel or CSV
+          <input type="file" accept=".xlsx,.csv,.tsv,.txt" style={{display:'none'}} onChange={e=>{const f=e.target.files[0];loadFile(f);e.target.value=''}}/>
+        </label>
+        <button onClick={()=>{setText([m.fields.join('\t'),m.sample.join('\t')].join('\n'));setRows([]);setDone(null)}} style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:8,padding:'6px 13px',cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:'inherit'}}>📋 Load sample</button>
+        <button onClick={()=>{
+          const csv=[m.fields.map(flabel).map(csvCell).join(','),m.sample.map(csvCell).join(',')].join('\r\n')
+          const a=document.createElement('a')
+          const url=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'}))
+          a.href=url;a.download=`axvon_${mod}_template.csv`
+          document.body.appendChild(a);a.click();document.body.removeChild(a)
+          setTimeout(()=>URL.revokeObjectURL(url),10000)
+        }} style={{background:'rgba(34,197,94,.1)',border:'1px solid rgba(34,197,94,.25)',borderRadius:8,padding:'6px 13px',cursor:'pointer',fontSize:12,fontWeight:600,fontFamily:'inherit',color:'#15803D'}}>⬇ Template</button>
+      </div>
+      <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Paste rows copied from Excel or Google Sheets…" style={{width:'100%',minHeight:100,border:'1.5px solid #E2E8F0',borderRadius:9,padding:'10px 12px',fontSize:12,fontFamily:'monospace',outline:'none',resize:'vertical',lineHeight:1.5}}/>
+      <div style={{display:'flex',gap:9,marginTop:10}}><Btn onClick={parse}>👁 Preview & Validate</Btn><BtnO onClick={()=>{setText('');setRows([]);setDone(null)}}>Clear</BtnO></div>
     </Card>
     {rows.length>0&&<Card style={{marginBottom:14}}>
       <div style={{padding:'12px 16px',borderBottom:'1px solid #E2E8F0',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:9}}>
         <div style={{fontWeight:700}}>{rows.length} rows detected</div>
         <div style={{display:'flex',gap:7}}>
           <span style={{padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:600,background:'rgba(34,197,94,.12)',color:'#15803D'}}>✓ {ok} valid</span>
+          {warnCount>0&&<span style={{padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:600,background:'rgba(245,158,11,.12)',color:'#B45309'}}>⚠ {warnCount} with warnings</span>}
           {errCount>0&&<span style={{padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:600,background:'rgba(239,68,68,.1)',color:'#B91C1C'}}>✕ {errCount} errors</span>}
         </div>
       </div>
       <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-        <thead><tr style={{background:'#F8FAFC'}}><th style={{padding:'8px 12px',textAlign:'left',fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',borderBottom:'1px solid #E2E8F0'}}>#</th>{(m.fields||[]).map(f=><th key={f} style={{padding:'8px 12px',textAlign:'left',fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{f}</th>)}<th style={{padding:'8px 12px',textAlign:'left',fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',borderBottom:'1px solid #E2E8F0'}}>Status</th></tr></thead>
-        <tbody>{rows.map((r,i)=><tr key={i} style={{borderBottom:'1px solid rgba(226,232,240,.6)',background:errors[i]?'rgba(239,68,68,.03)':''}}>
+        <thead><tr style={{background:'#F8FAFC'}}><th style={{padding:'8px 12px',textAlign:'left',fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',borderBottom:'1px solid #E2E8F0'}}>#</th>{m.fields.map(f=><th key={f} style={{padding:'8px 12px',textAlign:'left',fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{flabel(f)}</th>)}<th style={{padding:'8px 12px',textAlign:'left',fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',borderBottom:'1px solid #E2E8F0'}}>Status</th></tr></thead>
+        <tbody>{rows.map((r,i)=><tr key={i} style={{borderBottom:'1px solid rgba(226,232,240,.6)',background:r.errs.length?'rgba(239,68,68,.03)':r.warns.length?'rgba(245,158,11,.04)':''}}>
           <td style={{padding:'8px 12px',color:'#94A3B8',fontWeight:600,fontSize:11}}>{i+1}</td>
-          {(m.fields||[]).map(f=><td key={f} style={{padding:'6px 10px',color:errors[i]?'#DC2626':'#1E293B'}}>{r[f]||<span style={{color:'#CBD5E1',fontStyle:'italic'}}>—</span>}</td>)}
-          <td style={{padding:'8px 10px'}}>{errors[i]?<span style={{background:'rgba(239,68,68,.1)',color:'#DC2626',padding:'2px 8px',borderRadius:20,fontSize:11,fontWeight:600}}>Fix error</span>:<span style={{background:'rgba(34,197,94,.1)',color:'#15803D',padding:'2px 8px',borderRadius:20,fontSize:11,fontWeight:600}}>✓ Ready</span>}</td>
+          {m.fields.map(f=>{const v=r.out[f]??r.raw[f];return<td key={f} style={{padding:'6px 10px',color:r.errs.length?'#DC2626':'#1E293B',whiteSpace:'nowrap'}}>{v instanceof Date?toISODate(v):(v===''||v==null?<span style={{color:'#CBD5E1',fontStyle:'italic'}}>—</span>:String(v))}</td>})}
+          <td style={{padding:'8px 10px',minWidth:170}}>
+            {r.errs.length?<span title={r.errs.join(' · ')} style={{background:'rgba(239,68,68,.1)',color:'#DC2626',padding:'2px 8px',borderRadius:20,fontSize:11,fontWeight:600}}>✕ {r.errs[0]}</span>
+             :r.warns.length?<span title={r.warns.join(' · ')} style={{background:'rgba(245,158,11,.12)',color:'#B45309',padding:'2px 8px',borderRadius:20,fontSize:11,fontWeight:600}}>⚠ {r.warns[0]}</span>
+             :<span style={{background:'rgba(34,197,94,.1)',color:'#15803D',padding:'2px 8px',borderRadius:20,fontSize:11,fontWeight:600}}>✓ Ready</span>}
+          </td>
         </tr>)}
         </tbody>
       </table></div>
-      <div style={{padding:'12px 16px',borderTop:'1px solid #E2E8F0',display:'flex',gap:9}}>
-        <Btn onClick={doImport} disabled={importing}>{importing?'Importing…':`⬆ Import ${ok} valid rows`}</Btn>
-        {errCount>0&&<BtnO onClick={()=>{setRows(r=>r.filter((_,i)=>!errors[i]));setErrors({})}}>Remove error rows</BtnO>}
+      <div style={{padding:'12px 16px',borderTop:'1px solid #E2E8F0',display:'flex',gap:9,flexWrap:'wrap'}}>
+        <Btn onClick={doImport} disabled={importing||!ok}>{importing?'Importing…':`⬆ Import ${ok} valid row${ok===1?'':'s'}`}</Btn>
+        {errCount>0&&<BtnO onClick={()=>setRows(rs=>rs.filter(r=>!r.errs.length))}>Remove {errCount} error row{errCount===1?'':'s'}</BtnO>}
       </div>
     </Card>}
-    {done&&<div style={{background:'rgba(34,197,94,.07)',border:'1px solid rgba(34,197,94,.3)',borderRadius:12,padding:'20px 22px',textAlign:'center'}}><div style={{fontSize:32,marginBottom:8}}>🎉</div><div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{done} {mod} imported to database!</div><div style={{fontSize:13,color:'#64748B'}}>Records saved. Check the module to view.</div></div>}
+    {done&&<div style={{background:done.failed?'rgba(245,158,11,.07)':'rgba(34,197,94,.07)',border:`1px solid ${done.failed?'rgba(245,158,11,.35)':'rgba(34,197,94,.3)'}`,borderRadius:12,padding:'20px 22px',textAlign:'center'}}>
+      <div style={{fontSize:32,marginBottom:8}}>{done.failed?'⚠':'🎉'}</div>
+      <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{done.imported} {mod} imported to database{done.failed?` · ${done.failed} rejected`:''}</div>
+      {done.failed>0
+        ?<div style={{fontSize:12.5,color:'#92400E',textAlign:'left',maxWidth:520,margin:'8px auto 0'}}>{[...new Set(done.errors)].slice(0,6).map((e,i)=><div key={i}>· {e}</div>)}</div>
+        :<div style={{fontSize:13,color:'#64748B'}}>Records saved. Open the module to view them.</div>}
+    </div>}
   </div>
 }
 
