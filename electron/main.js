@@ -153,6 +153,48 @@ ipcMain.handle('get-app-info', () => ({ name: APP_NAME, version: APP_VERSION, da
 ipcMain.handle('open-external', (_, url) => shell.openExternal(url))
 ipcMain.handle('open-data-folder', () => shell.openPath(DATA_DIR))
 
+// ── Report exports ───────────────────────────────────────────────────
+// Exports are written straight to disk instead of going through the browser's
+// download machinery, which under file:// has nowhere sensible to put them.
+const REPORTS_DIR = path.join(DATA_DIR, 'reports')
+// The renderer supplies this name, so strip any directory part: a filename like
+// "../../evil.exe" must not be able to escape the reports folder.
+function safeReportName(name) {
+  const base = path.basename(String(name || 'report'))
+  const clean = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '')
+  return clean || 'report'
+}
+function reportPath(name) {
+  fs.mkdirSync(REPORTS_DIR, { recursive: true })
+  return path.join(REPORTS_DIR, safeReportName(name))
+}
+ipcMain.handle('save-report', (_, { filename, base64 }) => {
+  const target = reportPath(filename)
+  fs.writeFileSync(target, Buffer.from(String(base64 || ''), 'base64'))
+  return target
+})
+// A real PDF, not the print dialog. The report HTML is loaded into a hidden window
+// and rendered by Chromium's own PDF writer.
+ipcMain.handle('save-report-pdf', async (_, { filename, html }) => {
+  const target = reportPath(filename)
+  const tmp = path.join(os.tmpdir(), `axvon-report-${Date.now()}.html`)
+  fs.writeFileSync(tmp, String(html || ''), 'utf8')
+  const win = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: false, contextIsolation: true } })
+  try {
+    await win.loadFile(tmp)
+    const pdf = await win.webContents.printToPDF({ printBackground: true, margins: { marginType: 'default' } })
+    fs.writeFileSync(target, pdf)
+    return target
+  } finally {
+    if (!win.isDestroyed()) win.destroy()
+    fs.unlink(tmp, () => {})
+  }
+})
+ipcMain.handle('open-reports-folder', () => {
+  fs.mkdirSync(REPORTS_DIR, { recursive: true })
+  return shell.openPath(REPORTS_DIR)
+})
+
 // Closing the window only hides it to the tray, so clicking the shortcut again
 // would otherwise launch a second copy that fights the first for port 17823 and
 // the H2 file lock. Hand the click to the running instance instead.

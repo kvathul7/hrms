@@ -34,11 +34,23 @@ export const leaveAPI = { getAll: ()=>api.get('/leave/requests'), getPending: ()
 export const payrollAPI = { getAll: ()=>api.get('/payroll'), getByMonth: m=>api.get(`/payroll/month/${m}`), generate: d=>api.post('/payroll/generate',d), markPaid: id=>api.put(`/payroll/${id}/mark-paid`), delete: id=>api.delete(`/payroll/${id}`) }
 export const holidayAPI = { getAll: ()=>api.get('/holidays'), create: d=>api.post('/holidays',d), delete: id=>api.delete(`/holidays/${id}`) }
 export const candidateAPI = { getAll: ()=>api.get('/candidates'), create: d=>api.post('/candidates',d), update: (id,d)=>api.put(`/candidates/${id}`,d), delete: id=>api.delete(`/candidates/${id}`) }
+// The name-only attendance list, for companies that keep staff in a spreadsheet
+// and never fill in the full employee record. Name is the only required field.
+export const rosterAPI = {
+  getAll: ()=>api.get('/roster'),
+  create: d=>api.post('/roster',d),
+  // people: [{name, code?, department?, designation?, phone?}], source: 'EXCEL'|'PDF'
+  importList: (people,source)=>api.post('/roster/import',{ people, source }),
+  update: (id,d)=>api.put(`/roster/${id}`,d),
+  delete: id=>api.delete(`/roster/${id}`)
+}
 export const attendanceAPI = {
   byDate: d=>api.get('/attendance', { params: { date: d } }),
   getAll: ()=>api.get('/attendance/all'),
   byEmployee: id=>api.get(`/attendance/employee/${id}`),
   summary: d=>api.get('/attendance/summary', { params: { date: d } }),
+  // Inclusive both ends — backs the daily / monthly / 6-month / yearly reports.
+  range: (from,to)=>api.get('/attendance/range', { params: { from, to } }),
   mark: (date,records)=>api.post('/attendance/mark', { date, records }),
   delete: id=>api.delete(`/attendance/${id}`)
 }
@@ -69,6 +81,7 @@ export const adminAPI = {
   deletePayroll: ()=>api.delete('/admin/delete/payroll?confirm=true'),
   deleteCandidates: ()=>api.delete('/admin/delete/candidates?confirm=true'),
   deleteHolidays: ()=>api.delete('/admin/delete/holidays?confirm=true'),
+  deleteRoster: ()=>api.delete('/admin/delete/roster?confirm=true'),
   deleteAll: ()=>api.delete('/admin/delete/all?confirm=true&confirmPhrase=DELETE_ALL_AXVON_DATA')
 }
 export default api

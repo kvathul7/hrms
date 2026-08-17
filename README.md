@@ -81,14 +81,22 @@ Saves permanently to:
 
 1. Dashboard      — Live stats from database
 2. Employees      — Add, edit, delete, bulk import
-3. Attendance     — Daily marking (Present/WFH/Half/Leave/Absent), check-in/out times
+3. Attendance     — Daily marking (Present/WFH/Half/Leave/Absent), check-in/out times,
+                    search, and "Import Employee List": pull a plain name list straight
+                    from Excel or PDF and start marking — no employee ID, email,
+                    department or salary needed
 4. Leave          — Apply, approve, reject
 5. Payroll        — Generate, mark paid
 6. Recruitment    — Hiring pipeline
 7. Performance    — Create reviews, ratings, goals — saved to DB
 8. Departments    — Org structure
 9. Holidays       — Calendar
-10. Reports       — Real CSV download + PDF (print dialog) from live data
+10. Reports       — Save any report to your PC as CSV, Excel (.xlsx), Word (.docx)
+                    or PDF. Attendance can be run for a single day, a month, the
+                    last 6 months, the last year or a custom range, and includes a
+                    per-person summary (present/absent/WFH/half-day/leave, present %,
+                    total hours) alongside every daily record.
+                    Files are written to: C:\Users\YourName\.axvon\reports\
 11. Bulk Import   — Upload CSV file or paste rows from Excel
 12. Admin & Delete All — Per module deletion + full reset
 

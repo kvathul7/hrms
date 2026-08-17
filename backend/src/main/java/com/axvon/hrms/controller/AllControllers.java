@@ -494,17 +494,21 @@ class AdminController {
     private final CandidateRepository candRepo;
     private final AttendanceRepository attRepo;
     private final PerformanceReviewRepository perfRepo;
+    private final RosterEmployeeRepository rosterRepo;
 
     @GetMapping("/stats") public ResponseEntity<ApiResponse<Map<String,Long>>> stats(){
         return ResponseEntity.ok(ApiResponse.ok(Map.of(
             "employees",empRepo.count(),"leave",leaveRepo.count(),
-            "payroll",payRepo.count(),"candidates",candRepo.count(),"holidays",holRepo.count())));
+            "payroll",payRepo.count(),"candidates",candRepo.count(),"holidays",holRepo.count(),
+            "roster",rosterRepo.count())));
     }
     @DeleteMapping("/delete/employees") @Transactional public ResponseEntity<ApiResponse<Map<String,Object>>> delEmp(@RequestParam(defaultValue="false") boolean confirm){
         if(!confirm) return ResponseEntity.badRequest().body(ApiResponse.error("Pass ?confirm=true"));
         long count=empRepo.count();
         // Everything that FKs to an employee has to go first, or H2 rejects the delete.
-        payRepo.deleteAll(); attRepo.deleteAll(); leaveRepo.deleteAll(); perfRepo.deleteAll();
+        // Only employee-linked attendance goes: the imported roster is a separate list
+        // and its attendance history has no business disappearing with the employees.
+        payRepo.deleteAll(); attRepo.deleteEmployeeLinked(); leaveRepo.deleteAll(); perfRepo.deleteAll();
         empRepo.deleteAll();
         log.warn("ADMIN: {} employees deleted",count);
         return ResponseEntity.ok(ApiResponse.ok("All employees deleted",Map.of("deletedCount",count)));
@@ -529,6 +533,13 @@ class AdminController {
         long count=holRepo.count(); holRepo.deleteAll();
         return ResponseEntity.ok(ApiResponse.ok("All holidays deleted",Map.of("deletedCount",count)));
     }
+    @DeleteMapping("/delete/roster") @Transactional public ResponseEntity<ApiResponse<Map<String,Object>>> delRoster(@RequestParam(defaultValue="false") boolean confirm){
+        if(!confirm) return ResponseEntity.badRequest().body(ApiResponse.error("Pass ?confirm=true"));
+        long count=rosterRepo.count();
+        attRepo.deleteRosterLinked(); rosterRepo.deleteAll();
+        log.warn("ADMIN: {} imported attendance names deleted",count);
+        return ResponseEntity.ok(ApiResponse.ok("Imported attendance list cleared",Map.of("deletedCount",count)));
+    }
     @DeleteMapping("/delete/all") public ResponseEntity<ApiResponse<Map<String,Object>>> delAll(
             @RequestParam(defaultValue="false") boolean confirm,
             @RequestParam(defaultValue="") String confirmPhrase){
@@ -544,8 +555,109 @@ class AdminController {
         deleted.put("candidates",candRepo.count()); candRepo.deleteAll();
         deleted.put("holidays",holRepo.count()); holRepo.deleteAll();
         deleted.put("employees",empRepo.count()); empRepo.deleteAll();
+        // After attendance is gone nothing FKs to the roster any more.
+        deleted.put("roster",rosterRepo.count()); rosterRepo.deleteAll();
         log.warn("ADMIN: FULL RESET performed");
         return ResponseEntity.ok(ApiResponse.ok("Full reset complete",deleted));
+    }
+}
+
+// ── ATTENDANCE ROSTER ────────────────────────────────────────────────
+// The name-only employee list used by companies that keep staff in a spreadsheet
+// and only want to take attendance. Imported from Excel/PDF or typed in one at a
+// time. Name is the only required field; everything else is optional and only
+// filled when the operator chooses to map those columns.
+@RestController @RequestMapping("/roster") @RequiredArgsConstructor @Slf4j
+class RosterController {
+    private final RosterEmployeeRepository rosterRepo;
+    private final AttendanceRepository attRepo;
+
+    @GetMapping public ResponseEntity<ApiResponse<List<RosterEmployee>>> getAll(){
+        return ResponseEntity.ok(ApiResponse.ok(rosterRepo.findAllByOrderByNameAsc()));
+    }
+
+    @PostMapping @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
+    public ResponseEntity<ApiResponse<RosterEmployee>> create(@RequestBody Map<String,String> body){
+        String name = clean(body.get("name"));
+        if(name.isEmpty()) return ResponseEntity.badRequest().body(ApiResponse.error("Employee name is required"));
+        if(existingKeys().contains(RosterEmployee.key(name)))
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.error(name+" is already on the attendance list"));
+        return ResponseEntity.ok(ApiResponse.ok("Added", rosterRepo.save(fill(new RosterEmployee(), body, name, "MANUAL"))));
+    }
+
+    // Body: {source:"EXCEL"|"PDF", people:[{name, code?, department?, designation?, phone?}]}
+    // Skips blanks and anything already on the list, and reports both counts so the
+    // UI can say "8 added, 2 duplicates skipped" instead of silently doing nothing.
+    @PostMapping("/import") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
+    public ResponseEntity<ApiResponse<Map<String,Object>>> importList(@RequestBody Map<String,Object> body){
+        String source = body.get("source")!=null ? body.get("source").toString() : "EXCEL";
+        @SuppressWarnings("unchecked") List<Map<String,String>> people =
+            (List<Map<String,String>>) body.getOrDefault("people", List.of());
+        Set<String> keys = existingKeys();
+        List<String> added=new ArrayList<>(), duplicates=new ArrayList<>();
+        int blanks=0;
+        for(Map<String,String> p : people){
+            String name = clean(p.get("name"));
+            if(name.isEmpty()){ blanks++; continue; }
+            String key = RosterEmployee.key(name);
+            // Guard against duplicates already stored AND repeats within this one file.
+            if(!keys.add(key)){ duplicates.add(name); continue; }
+            rosterRepo.save(fill(new RosterEmployee(), p, name, source));
+            added.add(name);
+        }
+        log.info("ROSTER import from {}: {} added, {} duplicates, {} blank rows", source, added.size(), duplicates.size(), blanks);
+        Map<String,Object> out=new LinkedHashMap<>();
+        out.put("added",added.size()); out.put("skipped",duplicates.size()); out.put("blankRows",blanks);
+        out.put("addedNames",added); out.put("skippedNames",duplicates);
+        out.put("total",rosterRepo.count());
+        return ResponseEntity.ok(ApiResponse.ok(added.size()+" added, "+duplicates.size()+" duplicates skipped", out));
+    }
+
+    @PutMapping("/{id}") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
+    public ResponseEntity<ApiResponse<RosterEmployee>> update(@PathVariable Long id,@RequestBody Map<String,String> body){
+        return rosterRepo.findById(id).map(r->{
+            String name = body.containsKey("name") ? clean(body.get("name")) : r.getName();
+            if(name.isEmpty()) return ResponseEntity.badRequest().body(ApiResponse.<RosterEmployee>error("Employee name is required"));
+            // A rename may not collide with somebody else already on the list.
+            String key = RosterEmployee.key(name);
+            boolean taken = rosterRepo.findAll().stream()
+                .anyMatch(o->!o.getId().equals(id) && RosterEmployee.key(o.getName()).equals(key));
+            if(taken) return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.<RosterEmployee>error(name+" is already on the attendance list"));
+            return ResponseEntity.ok(ApiResponse.ok("Updated", rosterRepo.save(fill(r, body, name, r.getSource()))));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/{id}") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')") @Transactional
+    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable Long id){
+        if(!rosterRepo.existsById(id)) return ResponseEntity.notFound().build();
+        // Attendance rows FK to the roster entry, so they go first (same reason
+        // EmployeeController.delete clears children before the parent).
+        attRepo.deleteByRosterEmployeeId(id);
+        rosterRepo.deleteById(id);
+        return ResponseEntity.ok(ApiResponse.ok("Removed from attendance list",null));
+    }
+
+    private Set<String> existingKeys(){
+        Set<String> keys=new HashSet<>();
+        for(RosterEmployee r : rosterRepo.findAll()) keys.add(RosterEmployee.key(r.getName()));
+        return keys;
+    }
+    // "  Rahul   Kumar " → "Rahul Kumar". Spreadsheet cells are full of stray whitespace.
+    private static String clean(String s){ return s==null?"":s.trim().replaceAll("\\s+"," "); }
+    private static String opt(Map<String,String> b,String k,String current){
+        if(!b.containsKey(k)) return current;
+        String v=clean(b.get(k));
+        return v.isEmpty()?null:v;
+    }
+    private static RosterEmployee fill(RosterEmployee r,Map<String,String> b,String name,String source){
+        r.setName(name);
+        r.setCode(opt(b,"code",r.getCode()));
+        r.setDepartment(opt(b,"department",r.getDepartment()));
+        r.setDesignation(opt(b,"designation",r.getDesignation()));
+        r.setPhone(opt(b,"phone",r.getPhone()));
+        if(r.getIsActive()==null) r.setIsActive(true);
+        if(r.getSource()==null) r.setSource(source);
+        return r;
     }
 }
 
@@ -554,6 +666,7 @@ class AdminController {
 class AttendanceController {
     private final AttendanceRepository attRepo;
     private final EmployeeRepository empRepo;
+    private final RosterEmployeeRepository rosterRepo;
 
     @GetMapping public ResponseEntity<ApiResponse<List<Attendance>>> byDate(@RequestParam(required=false) String date){
         LocalDate d = (date==null||date.isBlank()) ? LocalDate.now() : LocalDate.parse(date);
@@ -568,6 +681,14 @@ class AttendanceController {
         return ResponseEntity.ok(ApiResponse.ok(attRepo.findByEmployeeId(empId)));
     }
 
+    // Backs the period reports (daily / monthly / 6 months / 1 year). Inclusive both ends.
+    @GetMapping("/range") public ResponseEntity<ApiResponse<List<Attendance>>> range(
+            @RequestParam String from,@RequestParam String to){
+        LocalDate a=LocalDate.parse(from), b=LocalDate.parse(to);
+        if(a.isAfter(b)){ LocalDate t=a; a=b; b=t; }
+        return ResponseEntity.ok(ApiResponse.ok(attRepo.findByAttendanceDateBetweenOrderByAttendanceDateAsc(a,b)));
+    }
+
     @GetMapping("/summary") public ResponseEntity<ApiResponse<Map<String,Object>>> summary(@RequestParam(required=false) String date){
         LocalDate d = (date==null||date.isBlank()) ? LocalDate.now() : LocalDate.parse(date);
         List<Attendance> recs = attRepo.findByAttendanceDate(d);
@@ -575,10 +696,13 @@ class AttendanceController {
         long absent  = recs.stream().filter(a->a.getStatus()==Attendance.AttStatus.Absent).count();
         long leave   = recs.stream().filter(a->a.getStatus()==Attendance.AttStatus.Leave).count();
         return ResponseEntity.ok(ApiResponse.ok(Map.of("date",d.toString(),"totalEmployees",empRepo.count(),
+            "rosterEmployees",rosterRepo.count(),"totalPeople",empRepo.count()+rosterRepo.count(),
             "marked",recs.size(),"present",present,"absent",absent,"leave",leave)));
     }
 
-    // Bulk mark/update attendance for a date. Body: {date:"YYYY-MM-DD", records:[{employeeId,status,checkIn?,checkOut?,notes?}]}
+    // Bulk mark/update attendance for a date.
+    // Body: {date:"YYYY-MM-DD", records:[{employeeId|rosterEmployeeId, status, checkIn?, checkOut?, notes?}]}
+    // Each record identifies EITHER a managed employee or an imported roster name.
     @PostMapping("/mark") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     public ResponseEntity<ApiResponse<Map<String,Object>>> mark(@RequestBody Map<String,Object> body){
         LocalDate d = body.get("date")!=null ? LocalDate.parse(body.get("date").toString()) : LocalDate.now();
@@ -586,10 +710,21 @@ class AttendanceController {
         int saved=0; List<String> errs=new ArrayList<>();
         for(Map<String,Object> r : records){
             try{
-                Long empId = Long.valueOf(r.get("employeeId").toString());
-                Employee emp = empRepo.findById(empId).orElseThrow(()->new IllegalArgumentException("Employee "+empId+" not found"));
-                Attendance a = attRepo.findByEmployeeIdAndAttendanceDate(empId, d)
-                    .orElse(Attendance.builder().employee(emp).attendanceDate(d).build());
+                Object empRef = r.get("employeeId"), rosterRef = r.get("rosterEmployeeId");
+                if(empRef==null && rosterRef==null)
+                    throw new IllegalArgumentException("Record needs employeeId or rosterEmployeeId");
+                Attendance a;
+                if(empRef!=null){
+                    Long empId = Long.valueOf(empRef.toString());
+                    Employee emp = empRepo.findById(empId).orElseThrow(()->new IllegalArgumentException("Employee "+empId+" not found"));
+                    a = attRepo.findByEmployeeIdAndAttendanceDate(empId, d)
+                        .orElse(Attendance.builder().employee(emp).attendanceDate(d).build());
+                }else{
+                    Long rosterId = Long.valueOf(rosterRef.toString());
+                    RosterEmployee person = rosterRepo.findById(rosterId).orElseThrow(()->new IllegalArgumentException("Roster entry "+rosterId+" not found"));
+                    a = attRepo.findByRosterEmployeeIdAndAttendanceDate(rosterId, d)
+                        .orElse(Attendance.builder().rosterEmployee(person).attendanceDate(d).build());
+                }
                 a.setStatus(Attendance.AttStatus.valueOf(r.get("status").toString()));
                 if(r.get("checkIn")!=null && !r.get("checkIn").toString().isBlank()) a.setCheckIn(LocalTime.parse(r.get("checkIn").toString()));
                 if(r.get("checkOut")!=null && !r.get("checkOut").toString().isBlank()) a.setCheckOut(LocalTime.parse(r.get("checkOut").toString()));

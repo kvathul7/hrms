@@ -12,7 +12,7 @@ AXVON HRMS is a complete enterprise-grade Human Resource Management System built
 ## Tech Stack
 | Layer | Technology |
 |-------|-----------|
-| Frontend | React 18 + Vite + Axios |
+| Frontend | React 18 + Vite + Axios (read-excel-file for .xlsx, pdfjs-dist for PDF text) |
 | Backend | Spring Boot 3 + Spring Security + JWT + Lombok |
 | Database | H2 Embedded (no MySQL needed) |
 | Desktop | Electron 28 + electron-builder |
@@ -35,6 +35,7 @@ axvon-final-build/
 │       ├── AxvonHrmsApplication.java
 │       ├── config/
 │       │   ├── SecurityConfig.java        ← CORS wildcard, JWT, BCrypt
+│       │   ├── SchemaUpgrader.java        ← relaxes NOT NULL that ddl-auto won't
 │       │   └── DataInitializer.java       ← Seeds demo data on first launch
 │       ├── controller/
 │       │   └── AllControllers.java        ← All REST endpoints
@@ -44,6 +45,7 @@ axvon-final-build/
 │       ├── entity/
 │       │   ├── User.java
 │       │   ├── Employee.java
+│       │   ├── RosterEmployee.java     ← name-only person, attendance list only
 │       │   ├── Department.java
 │       │   ├── LeaveRequest.java
 │       │   ├── Payroll.java
@@ -54,6 +56,7 @@ axvon-final-build/
 │       ├── repository/
 │       │   ├── UserRepository.java
 │       │   ├── EmployeeRepository.java
+│       │   ├── RosterEmployeeRepository.java
 │       │   ├── DepartmentRepository.java
 │       │   ├── LeaveRequestRepository.java
 │       │   ├── PayrollRepository.java
@@ -127,14 +130,14 @@ axvon-final-build/
 |---|--------|--------------|
 | 1 | Dashboard | GET /api/dashboard/stats, /api/dashboard/health |
 | 2 | Employees | GET/POST/PUT/DELETE /api/employees |
-| 3 | Attendance | GET/POST/PUT /api/attendance |
+| 3 | Attendance | GET/POST/PUT /api/attendance; GET/POST/PUT/DELETE /api/roster, POST /api/roster/import |
 | 4 | Leave | GET/POST/PUT /api/leave/requests |
 | 5 | Payroll | GET/POST /api/payroll, POST /api/payroll/generate |
 | 6 | Recruitment | GET/POST/PUT/DELETE /api/candidates |
 | 7 | Performance | GET/POST/PUT /api/performance |
 | 8 | Departments | GET/POST/PUT/DELETE /api/departments |
 | 9 | Holidays | GET/POST/DELETE /api/holidays |
-| 10 | Reports | GET /api/reports/summary (SUPER_ADMIN/HR_ADMIN/MANAGER); CSV/PDF export from each module |
+| 10 | Reports | GET /api/reports/summary (SUPER_ADMIN/HR_ADMIN/MANAGER); CSV / Excel / Word / PDF export from each module. Attendance also does daily, monthly, 6-month, 1-year and custom periods via GET /api/attendance/range |
 | 11 | Bulk Import | POST /api/employees/bulk-import |
 | 12 | Admin & Delete | DELETE /api/admin/delete/* |
 
@@ -210,6 +213,38 @@ All endpoints return:
     holiday date). Only genuinely unexpected failures may return 500.
 15. **Employee IDs auto-generate** — `create` and `bulk-import` fill a blank `empId` with the
     next `AXVnnn` in the series; bulk import rejects blank names/emails, not just nulls.
+16. **`RosterEmployee` is not an `Employee`** — the Attendance "Import Employee List" feature
+    stores name-only people in `roster_employees`. Do NOT route them through `Employee`:
+    `Employee.email` is `NOT NULL UNIQUE` and payroll generation loops over every Active
+    employee, so imported names would need fabricated emails and would draw ₹0 payslips.
+    Only `name` is required; `code`/`department`/`designation`/`phone` are optional and stay
+    null unless the operator maps those columns.
+17. **`Attendance` hangs off exactly one side** — either `employee` or `rosterEmployee` is set,
+    never both, never neither. `AttendanceController.mark` enforces it; `getPersonName()`
+    returns whichever applies. Both FKs are nullable, so anything reading `a.employee`
+    directly must null-check it.
+18. **`SchemaUpgrader` exists because `ddl-auto=update` only adds** — it never relaxes an
+    existing `NOT NULL`. Databases created before the roster still had
+    `attendance.employee_id NOT NULL`, which rejected every roster row. Put idempotent
+    `ALTER`s there, and keep the `EntityManagerFactory` constructor dependency: it is what
+    guarantees Hibernate finished its schema update first.
+19. **pdf.js worker must stay inlined** — `pdfjs-dist/build/pdf.worker.min.mjs?worker&inline`
+    becomes a blob URL. A separate worker asset is unreliable when the packaged app serves
+    the page over `file://`, so do not "optimise" this into an external chunk.
+20. **`.xlsx` and `.docx` are written by hand** — `services/exporters.js` builds real OPC
+    packages (a ZIP of XML parts) with STORED entries, so no deflate and no spreadsheet
+    library is needed. Do NOT "fix" these into CSV-renamed-to-.xls or HTML-renamed-to-.doc;
+    Office shows a corruption warning for those. Every export renders from one shape:
+    `{title, subtitle, sheets:[{name, cols, rows}]}`. Put real JS numbers in `rows` — that
+    is what makes Excel treat a cell as numeric rather than text.
+21. **Exports are saved by the main process, not the browser** — under `file://` a normal
+    download has nowhere sensible to go, so `save-report` / `save-report-pdf` IPC write into
+    `~/.axvon/reports`. PDFs come from `webContents.printToPDF` in a hidden window, not the
+    print dialog. `safeReportName()` reduces the renderer-supplied filename to a basename:
+    keep it, or a crafted name could write outside that folder. In a plain browser the same
+    code falls back to a blob download.
+22. **Report dates are built from local parts** — `ymd()` never uses `toISOString()`, which
+    shifts to UTC and can drop or double-count a day at the month boundary.
 
 ---
 
