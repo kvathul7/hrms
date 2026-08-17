@@ -59,10 +59,18 @@ axvon-final-build/
 1. User double-clicks desktop icon
 2. Splash screen appears while Spring Boot starts
 3. H2 database loads from `C:\Users\<name>\.axvon\data\`
-4. Demo data auto-seeded on first launch
-5. Login screen appears
+4. **First-run setup** asks you to create your own Super Admin account —
+   a fresh installation ships with no accounts and no data
+5. From then on, that account is the login
 
-## LOGIN CREDENTIALS
+## FIRST RUN
+
+There are no default passwords. On an empty database the app opens its setup
+screen, you create the owner account, and it locks itself afterwards.
+
+Setup offers a **"load sample data"** tick box. Leave it **off** for real use.
+Turn it **on** to explore the app with a fictional company, which also creates
+these four demo logins:
 
 | Role        | Email              | Password |
 |-------------|-------------------|----------|
@@ -70,6 +78,21 @@ axvon-final-build/
 | HR Admin    | hr@axvon.io       | hr123    |
 | Manager     | manager@axvon.io  | mgr123   |
 | Employee    | emp@axvon.io      | emp123   |
+
+Those accounts exist **only** if you ticked sample data. Delete them from
+**Users & Access** before putting real information in.
+
+## WHO CAN SEE WHAT
+
+| | Super Admin | HR Admin | Manager | Employee |
+|---|---|---|---|---|
+| Staff directory | ✅ | ✅ | ✅ | ✅ (no salaries) |
+| Salaries & payroll | ✅ | ✅ | — | — |
+| Attendance & reports | ✅ | ✅ | ✅ | — |
+| Performance reviews | ✅ | ✅ | ✅ | — |
+| Leave requests | all | all | all | own only |
+| Recruitment | ✅ | ✅ | — | — |
+| Accounts & deletion | ✅ | view only | — | — |
 
 ## DATA STORAGE
 

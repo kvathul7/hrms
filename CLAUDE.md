@@ -115,7 +115,9 @@ axvon-final-build/
 
 ---
 
-## Login Credentials (auto-seeded on first launch)
+## Login Credentials (only exist if "load sample data" was ticked at first-run setup)
+A fresh install has NO accounts — `/api/setup/init` creates the first one. These four
+come from `DataInitializer.seedDemoData()`, which only runs on request.
 | Role | Email | Password |
 |------|-------|---------|
 | Super Admin | admin@axvon.io | admin123 |
