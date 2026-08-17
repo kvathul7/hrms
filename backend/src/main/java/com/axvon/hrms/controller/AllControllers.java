@@ -10,7 +10,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.authentication.*;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
@@ -255,8 +257,32 @@ class EmployeeController {
     private final LeaveRequestRepository leaveRepo;
     private final PerformanceReviewRepository perfRepo;
 
-    @GetMapping public ResponseEntity<ApiResponse<List<Employee>>> getAll(){return ResponseEntity.ok(ApiResponse.ok(empRepo.findAll()));}
-    @GetMapping("/{id}") public ResponseEntity<ApiResponse<Employee>> getById(@PathVariable Long id){return empRepo.findById(id).map(e->ResponseEntity.ok(ApiResponse.ok(e))).orElse(ResponseEntity.notFound().build());}
+    // Readable by every role because the Attendance sheet and the staff directory need
+    // it — but pay is not directory information. Anyone below HR sees the record with
+    // basicSalary blanked, so an employee can no longer read every colleague's salary.
+    @GetMapping public ResponseEntity<ApiResponse<List<Employee>>> getAll(Authentication auth){
+        boolean pay=canSeePay(auth);
+        return ResponseEntity.ok(ApiResponse.ok(empRepo.findAll().stream().map(e->pay?e:withoutPay(e)).toList()));
+    }
+    @GetMapping("/{id}") public ResponseEntity<ApiResponse<Employee>> getById(@PathVariable Long id,Authentication auth){
+        boolean pay=canSeePay(auth);
+        return empRepo.findById(id).map(e->ResponseEntity.ok(ApiResponse.ok(pay?e:withoutPay(e)))).orElse(ResponseEntity.notFound().build());
+    }
+    static boolean canSeePay(Authentication auth){
+        if(auth==null) return false;
+        return auth.getAuthorities().stream().map(GrantedAuthority::getAuthority)
+            .anyMatch(a->a.equals("ROLE_SUPER_ADMIN")||a.equals("ROLE_HR_ADMIN"));
+    }
+    // A fresh object, never the entity itself: blanking a field on a JPA instance risks
+    // writing that blank back to the database.
+    private static Employee withoutPay(Employee e){
+        return Employee.builder().id(e.getId()).empId(e.getEmpId()).user(e.getUser())
+            .firstName(e.getFirstName()).lastName(e.getLastName()).email(e.getEmail())
+            .phone(e.getPhone()).gender(e.getGender()).department(e.getDepartment())
+            .designation(e.getDesignation()).joinDate(e.getJoinDate()).status(e.getStatus())
+            .location(e.getLocation()).basicSalary(null).manager(e.getManager())
+            .createdAt(e.getCreatedAt()).updatedAt(e.getUpdatedAt()).build();
+    }
 
     @PostMapping @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')")
     public ResponseEntity<ApiResponse<Employee>> create(@RequestBody Map<String,Object> body){
@@ -384,8 +410,26 @@ class DepartmentController {
 class LeaveController {
     private final LeaveRequestRepository repo;
     private final EmployeeRepository empRepo;
-    @GetMapping("/requests") public ResponseEntity<ApiResponse<List<LeaveRequest>>> getAll(){return ResponseEntity.ok(ApiResponse.ok(repo.findAll()));}
-    @GetMapping("/requests/pending") public ResponseEntity<ApiResponse<List<LeaveRequest>>> pending(){return ResponseEntity.ok(ApiResponse.ok(repo.findByStatus(LeaveRequest.Status.Pending)));}
+    // A leave reason is medical or personal information. Approvers see the queue;
+    // everyone else sees only their own requests, rather than the whole company's.
+    @GetMapping("/requests") public ResponseEntity<ApiResponse<List<LeaveRequest>>> getAll(Authentication auth){
+        if(canApprove(auth)) return ResponseEntity.ok(ApiResponse.ok(repo.findAll()));
+        Long me=ownEmployeeId(auth);
+        return ResponseEntity.ok(ApiResponse.ok(me==null?List.of():repo.findByEmployeeId(me)));
+    }
+    @GetMapping("/requests/pending") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
+    public ResponseEntity<ApiResponse<List<LeaveRequest>>> pending(){return ResponseEntity.ok(ApiResponse.ok(repo.findByStatus(LeaveRequest.Status.Pending)));}
+
+    static boolean canApprove(Authentication auth){
+        if(auth==null) return false;
+        return auth.getAuthorities().stream().map(GrantedAuthority::getAuthority)
+            .anyMatch(a->a.equals("ROLE_SUPER_ADMIN")||a.equals("ROLE_HR_ADMIN")||a.equals("ROLE_MANAGER"));
+    }
+    // The employee record linked to the signed-in login, or null if there isn't one.
+    private Long ownEmployeeId(Authentication auth){
+        if(auth==null||auth.getName()==null) return null;
+        return empRepo.findByEmail(auth.getName()).map(Employee::getId).orElse(null);
+    }
     @PostMapping("/apply") public ResponseEntity<ApiResponse<LeaveRequest>> apply(@RequestBody Map<String,Object> body){
         LeaveRequest lr=new LeaveRequest();
         empRepo.findById(Long.valueOf(body.get("employeeId").toString())).ifPresent(lr::setEmployee);
@@ -412,7 +456,10 @@ class LeaveController {
 class PayrollController {
     private final PayrollRepository repo;
     private final EmployeeRepository empRepo;
+    // Payslips are pay data: HR and owners only, never the whole company.
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')")
     @GetMapping public ResponseEntity<ApiResponse<List<Payroll>>> getAll(){return ResponseEntity.ok(ApiResponse.ok(repo.findAll()));}
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')")
     @GetMapping("/month/{month}") public ResponseEntity<ApiResponse<List<Payroll>>> byMonth(@PathVariable String month){return ResponseEntity.ok(ApiResponse.ok(repo.findByPayMonth(month)));}
     @PostMapping("/generate") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')") public ResponseEntity<ApiResponse<Map<String,Object>>> generate(@RequestBody Map<String,Object> body){
         String month=body.get("payMonth").toString();
@@ -460,6 +507,7 @@ class HolidayController {
 @RestController @RequestMapping("/candidates") @RequiredArgsConstructor
 class CandidateController {
     private final CandidateRepository repo;
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')")
     @GetMapping public ResponseEntity<ApiResponse<List<Candidate>>> getAll(){return ResponseEntity.ok(ApiResponse.ok(repo.findAll()));}
     @PostMapping @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')") public ResponseEntity<ApiResponse<Candidate>> create(@RequestBody Candidate c){return ResponseEntity.ok(ApiResponse.ok("Created",repo.save(c)));}
     @PutMapping("/{id}") @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN')") public ResponseEntity<ApiResponse<Candidate>> update(@PathVariable Long id,@RequestBody Candidate body){return repo.findById(id).map(c->{c.setStage(body.getStage());c.setStatus(body.getStatus());c.setNotes(body.getNotes());return ResponseEntity.ok(ApiResponse.ok("Updated",repo.save(c)));}).orElse(ResponseEntity.notFound().build());}
@@ -668,11 +716,15 @@ class AttendanceController {
     private final EmployeeRepository empRepo;
     private final RosterEmployeeRepository rosterRepo;
 
+    // Marking is already limited to these roles; reading the whole company's
+    // attendance should match it.
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     @GetMapping public ResponseEntity<ApiResponse<List<Attendance>>> byDate(@RequestParam(required=false) String date){
         LocalDate d = (date==null||date.isBlank()) ? LocalDate.now() : LocalDate.parse(date);
         return ResponseEntity.ok(ApiResponse.ok(attRepo.findByAttendanceDate(d)));
     }
 
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     @GetMapping("/all") public ResponseEntity<ApiResponse<List<Attendance>>> all(){
         return ResponseEntity.ok(ApiResponse.ok(attRepo.findAll()));
     }
@@ -682,6 +734,7 @@ class AttendanceController {
     }
 
     // Backs the period reports (daily / monthly / 6 months / 1 year). Inclusive both ends.
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     @GetMapping("/range") public ResponseEntity<ApiResponse<List<Attendance>>> range(
             @RequestParam String from,@RequestParam String to){
         LocalDate a=LocalDate.parse(from), b=LocalDate.parse(to);
@@ -689,6 +742,7 @@ class AttendanceController {
         return ResponseEntity.ok(ApiResponse.ok(attRepo.findByAttendanceDateBetweenOrderByAttendanceDateAsc(a,b)));
     }
 
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     @GetMapping("/summary") public ResponseEntity<ApiResponse<Map<String,Object>>> summary(@RequestParam(required=false) String date){
         LocalDate d = (date==null||date.isBlank()) ? LocalDate.now() : LocalDate.parse(date);
         List<Attendance> recs = attRepo.findByAttendanceDate(d);
@@ -749,10 +803,13 @@ class PerformanceController {
     private final PerformanceReviewRepository perfRepo;
     private final EmployeeRepository empRepo;
 
+    // Ratings and review comments about other people.
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     @GetMapping public ResponseEntity<ApiResponse<List<PerformanceReview>>> getAll(){
         return ResponseEntity.ok(ApiResponse.ok(perfRepo.findAll()));
     }
 
+    @PreAuthorize("hasAnyRole('SUPER_ADMIN','HR_ADMIN','MANAGER')")
     @GetMapping("/stats") public ResponseEntity<ApiResponse<Map<String,Object>>> stats(){
         List<PerformanceReview> all = perfRepo.findAll();
         double avg = all.stream().filter(p->p.getRating()!=null).mapToDouble(p->p.getRating().doubleValue()).average().orElse(0);

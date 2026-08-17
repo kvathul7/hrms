@@ -109,13 +109,19 @@ function ConfirmPhrase({phrase,message,danger='Delete',onConfirm}){
   </div>
 }
 
+// `roles` here mirrors the @PreAuthorize on the endpoints each screen calls. Keep the
+// two in step: a screen offered to a role whose API answers 403 just looks broken.
+// Employees and Leave stay open to everyone — a staff directory and applying for your
+// own leave — but the server blanks salaries and scopes the leave list accordingly.
+const OFFICE=['SUPER_ADMIN','HR_ADMIN']
+const OFFICE_MGR=['SUPER_ADMIN','HR_ADMIN','MANAGER']
 const NAV=[
   {g:'Overview',items:[{id:'dashboard',l:'Dashboard',i:'📊'}]},
-  {g:'Workforce',items:[{id:'employees',l:'Employees',i:'👥'},{id:'attendance',l:'Attendance',i:'🕐'},{id:'leave',l:'Leave',i:'🌴'},{id:'payroll',l:'Payroll',i:'💰'}]},
-  {g:'Talent',items:[{id:'recruitment',l:'Recruitment',i:'🎯'},{id:'performance',l:'Performance',i:'⭐'}]},
+  {g:'Workforce',items:[{id:'employees',l:'Employees',i:'👥'},{id:'attendance',l:'Attendance',i:'🕐',roles:OFFICE_MGR},{id:'leave',l:'Leave',i:'🌴'},{id:'payroll',l:'Payroll',i:'💰',roles:OFFICE}]},
+  {g:'Talent',items:[{id:'recruitment',l:'Recruitment',i:'🎯',roles:OFFICE},{id:'performance',l:'Performance',i:'⭐',roles:OFFICE_MGR}]},
   {g:'Organisation',items:[{id:'departments',l:'Departments',i:'🏢'},{id:'holidays',l:'Holidays',i:'📅'}]},
-  {g:'Insights',items:[{id:'reports',l:'Reports',i:'📁'}]},
-  {g:'System',items:[{id:'bulk',l:'Bulk Import',i:'⬆'},{id:'users',l:'Users & Access',i:'🔑',roles:['SUPER_ADMIN']},{id:'admin',l:'Admin & Delete',i:'⚙',roles:['SUPER_ADMIN']},{id:'about',l:'About',i:'★'}]}
+  {g:'Insights',items:[{id:'reports',l:'Reports',i:'📁',roles:OFFICE_MGR}]},
+  {g:'System',items:[{id:'bulk',l:'Bulk Import',i:'⬆',roles:OFFICE},{id:'users',l:'Users & Access',i:'🔑',roles:['SUPER_ADMIN']},{id:'admin',l:'Admin & Delete',i:'⚙',roles:['SUPER_ADMIN']},{id:'about',l:'About',i:'★'}]}
 ]
 // The endpoints enforce this too — hiding the entries just avoids offering people
 // buttons that will only ever answer 403.
@@ -1767,7 +1773,11 @@ function Shell({user,onLogout}){
   },[])
   const pages={dashboard:<Dashboard user={user}/>,employees:<Employees/>,attendance:<Attendance/>,leave:<Leave/>,payroll:<Payroll/>,recruitment:<Recruitment/>,performance:<Performance/>,departments:<Departments/>,holidays:<Holidays/>,reports:<Reports/>,bulk:<BulkImport/>,users:<Users me={user}/>,admin:<Admin/>,about:<About/>}
   const nav=navFor(user.role)
-  const label=nav.flatMap(g=>g.items).find(i=>i.id===page)?.l||'Dashboard'
+  // navTo() can still be handed a page this role has no access to — the Reports cards
+  // link straight to Attendance, for one. Fall back rather than render a screen whose
+  // every request answers 403.
+  const view=nav.flatMap(g=>g.items).some(i=>i.id===page)?page:'dashboard'
+  const label=nav.flatMap(g=>g.items).find(i=>i.id===view)?.l||'Dashboard'
   return<div style={{display:'flex',height:'100vh',overflow:'hidden'}}>
     <nav style={{width:col?62:230,background:'#0F172A',display:'flex',flexDirection:'column',flexShrink:0,transition:'width .2s',overflow:'hidden'}}>
       <div style={{padding:'16px 18px',display:'flex',alignItems:'center',gap:11,borderBottom:'1px solid rgba(255,255,255,.07)',minHeight:64,overflow:'hidden'}}>
@@ -1804,7 +1814,7 @@ function Shell({user,onLogout}){
         </div>
       </div>
       <div style={{flex:1,overflowY:'auto',padding:'22px 26px 36px'}}>
-        <div key={page} style={{animation:'fadeUp .22s ease'}}>{pages[page]||<Dashboard user={user}/>}</div>
+        <div key={view} style={{animation:'fadeUp .22s ease'}}>{pages[view]||<Dashboard user={user}/>}</div>
       </div>
       <div style={{background:'#fff',borderTop:'1px solid #E2E8F0',padding:'8px 26px',display:'flex',justifyContent:'space-between',flexShrink:0}}>
         <div style={{fontSize:11,color:'#94A3B8'}}><b style={{color:'#14B8A6'}}>AXVON HRMS</b> · React 18 + Spring Boot 3 + H2 Database · Full Stack</div>

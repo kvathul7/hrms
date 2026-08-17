@@ -23,7 +23,11 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 String email=jwtUtil.extractEmail(token);
                 if(email!=null&&SecurityContextHolder.getContext().getAuthentication()==null){
                     UserDetails ud=userDetailsService.loadUserByUsername(email);
-                    if(jwtUtil.validate(token,ud)){
+                    // isEnabled() must be checked here too. It is otherwise only consulted
+                    // by DaoAuthenticationProvider at login, which this filter bypasses —
+                    // so deactivating an account left its existing token working, with full
+                    // read AND write access, until the token expired a day later.
+                    if(ud.isEnabled()&&jwtUtil.validate(token,ud)){
                         var auth=new UsernamePasswordAuthenticationToken(ud,null,ud.getAuthorities());
                         auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(req));
                         SecurityContextHolder.getContext().setAuthentication(auth);
