@@ -12,6 +12,8 @@ public interface AttendanceRepository extends JpaRepository<Attendance,Long>{
     // every row ever recorded, which a year of daily marking would otherwise mean.
     List<Attendance> findByAttendanceDateBetweenOrderByAttendanceDateAsc(LocalDate from,LocalDate to);
     List<Attendance> findByEmployeeId(Long empId);
+    // Backs the per-employee month used by payroll loss-of-pay and by "My Attendance".
+    List<Attendance> findByEmployeeIdAndAttendanceDateBetweenOrderByAttendanceDateAsc(Long empId,LocalDate from,LocalDate to);
     Optional<Attendance> findByEmployeeIdAndAttendanceDate(Long empId,LocalDate date);
     void deleteByEmployeeId(Long empId);
     List<Attendance> findByRosterEmployeeId(Long rosterId);

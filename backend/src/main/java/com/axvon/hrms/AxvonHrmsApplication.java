@@ -1,7 +1,9 @@
 package com.axvon.hrms;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-@SpringBootApplication
+import org.springframework.scheduling.annotation.EnableScheduling;
+// Scheduling drives one job: the 1 January leave-balance rollover.
+@SpringBootApplication @EnableScheduling
 public class AxvonHrmsApplication {
     public static void main(String[] args) {
         SpringApplication.run(AxvonHrmsApplication.class, args);

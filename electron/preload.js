@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveReport: payload => ipcRenderer.invoke('save-report', payload),
   saveReportPdf: payload => ipcRenderer.invoke('save-report-pdf', payload),
   openReportsFolder: () => ipcRenderer.invoke('open-reports-folder'),
+  // Automatic database copies taken on every launch.
+  openBackupsFolder: () => ipcRenderer.invoke('open-backups-folder'),
+  // Native desktop notification, e.g. when a leave request arrives.
+  notify: payload => ipcRenderer.invoke('notify', payload),
   isElectron: true,
   platform: process.platform
 })

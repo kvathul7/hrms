@@ -52,7 +52,13 @@ axvon-final-build/
 │       │   ├── Holiday.java
 │       │   ├── Candidate.java
 │       │   ├── Attendance.java
-│       │   └── PerformanceReview.java
+│       │   ├── PerformanceReview.java
+│       │   ├── CompanySettings.java     ← one row, id=1: identity, payroll rates, quotas
+│       │   ├── LeaveBalance.java        ← per employee / type / calendar year
+│       │   ├── AuditLog.java            ← who changed what, append-only
+│       │   ├── SalaryRevision.java
+│       │   ├── Resignation.java
+│       │   └── EmployeeDocument.java    ← base64 in the DB, not a folder
 │       ├── repository/
 │       │   ├── UserRepository.java
 │       │   ├── EmployeeRepository.java
@@ -62,12 +68,21 @@ axvon-final-build/
 │       │   ├── PayrollRepository.java
 │       │   ├── HolidayRepository.java
 │       │   ├── CandidateRepository.java
-│       │   └── AttendanceRepository.java
+│       │   ├── AttendanceRepository.java
+│       │   ├── CompanySettingsRepository.java
+│       │   ├── LeaveBalanceRepository.java
+│       │   ├── AuditLogRepository.java   ← paged; the only table that only grows
+│       │   ├── SalaryRevisionRepository.java
+│       │   ├── ResignationRepository.java
+│       │   └── EmployeeDocumentRepository.java
 │       ├── security/
 │       │   ├── JwtUtil.java
 │       │   └── JwtAuthFilter.java
 │       ├── service/
-│       │   └── UserDetailsServiceImpl.java
+│       │   ├── UserDetailsServiceImpl.java
+│       │   ├── AuditService.java          ← every auditable action writes through it
+│       │   ├── SettingsService.java       ← get-or-create the single settings row
+│       │   └── LeaveBalanceService.java   ← quotas, lazy rows, 1 Jan rollover
 │       └── exception/
 │           └── GlobalExceptionHandler.java
 │
@@ -141,7 +156,15 @@ come from `DataInitializer.seedDemoData()`, which only runs on request.
 | 9 | Holidays | GET/POST/DELETE /api/holidays |
 | 10 | Reports | GET /api/reports/summary (SUPER_ADMIN/HR_ADMIN/MANAGER); CSV / Excel / Word / PDF export from each module. Attendance also does daily, monthly, 6-month, 1-year and custom periods via GET /api/attendance/range |
 | 11 | Bulk Import | POST /api/employees/bulk-import |
-| 12 | Admin & Delete | DELETE /api/admin/delete/* |
+| 12 | Admin & Delete | DELETE /api/admin/delete/*; GET /api/backup/export, POST /api/backup/restore |
+| 13 | Company Settings | GET /api/settings, PUT /api/settings (SUPER_ADMIN) — identity, payroll rates, leave quotas |
+| 14 | Users & Access | GET/POST/PUT/DELETE /api/users, PUT /api/users/{id}/password, PUT /api/users/me/password |
+| 15 | Audit Log | GET /api/audit (paged, filterable), GET /api/audit/actions (SUPER_ADMIN) |
+| 16 | Resignations | GET/POST /api/resignations, PUT /api/resignations/{id}/approve, /reject |
+| 17 | Salary History | GET /api/salary-revisions/employee/{id}, POST /api/salary-revisions |
+| 18 | Documents | GET/POST/DELETE /api/documents, GET /api/documents/{id}/download |
+| 19 | Self-Service | GET /api/me/profile, /me/payslips, /me/attendance, /me/leave |
+| 20 | Notifications | GET /api/notifications |
 
 ---
 
@@ -165,10 +188,10 @@ http://localhost:17824
 ## How to Build the .exe
 ```bash
 # Run as Administrator on Windows
-BUILD_AXVON.bat
+BUILD_AXVON.bat        # runs the backend tests, then packages
 
 # Or manually:
-cd backend && mvn clean package -DskipTests
+cd backend && mvn clean package        # tests run; add -DskipTests only to iterate
 cd ../frontend && npm install && npm run build
 cd ../electron && npm install && npm run build:win
 
@@ -248,6 +271,51 @@ All endpoints return:
 22. **Report dates are built from local parts** — `ymd()` never uses `toISOString()`, which
     shifts to UTC and can drop or double-count a day at the month boundary.
 
+23. **Payroll rates live in `CompanySettings`, not in code** — `PayrollController.generate`
+    reads HRA / special allowance / PF / ESI / professional tax / TDS and
+    `workingDaysPerMonth` from the single settings row (id=1, created on first read by
+    `SettingsService`). Percentages are stored whole: 40 means 40%. Do NOT put a rate
+    back into the method — they change with every budget.
+24. **Absence costs pay, approved leave does not** — payroll counts the month's
+    attendance and charges `basicSalary / workingDaysPerMonth` per absent day, half that
+    for a half day. A date covered by an *approved* `LeaveRequest` is exempt even when
+    somebody also marked the person Absent. `Payroll.lopDeduction` / `presentDays` /
+    `absentDays` / `leaveDays` / `payableDays` record the working.
+25. **Leave balance moves only on a status transition** — `Pending → Approved` spends
+    days, `Approved → Rejected/deleted` gives them back. Approving twice must not charge
+    twice. Types with no quota (Unpaid, Maternity, Paternity) return `null` from
+    `LeaveBalanceService.remaining()` and are never blocked.
+26. **`/leave/apply` trusts the token, not the body** — only SUPER_ADMIN and HR_ADMIN may
+    file leave for another person; everyone else is forced to their own employee record
+    and gets 403 if the body names somebody else. The old version took `employeeId`
+    straight from the request, which let any account file and then read back leave in a
+    colleague's name.
+27. **An employee sees their own salary, nobody else's** — `EmployeeController.withoutPay`
+    blanks `basicSalary` for anyone below HR *except* on their own record
+    (`isSelf`, matched on email). A blanked salary must render as "—", never ₹0.
+28. **Audit failures must not roll back the action** — `AuditService` swallows its own
+    exceptions and logs to file. An unwritable audit row is not a reason to refuse the
+    edit the operator asked for. The audit table also survives a full reset on purpose.
+29. **Restore uses `deleteAllInBatch()`, never `deleteAll()`** — inside one transaction
+    JPA queues removals and issues them at flush time, i.e. *after* the inserts, so the
+    old rows were still present when the restored ones were written and the restore died
+    on the unique department name. `deleteAllInBatch` issues each DELETE immediately.
+30. **A backup matches people by email, not by row id** — so a file from one installation
+    loads into another. User accounts are deliberately NOT restored (that would lock the
+    operator out), which means restored employees come back with `user = null` and must
+    be re-linked in Users & Access.
+31. **Documents live in the database as base64** — not in a folder, so one backup file
+    carries them and the browser build behaves like the desktop one. `EmployeeDocument.data`
+    is `@JsonIgnore`: listing documents must never ship every byte, only
+    `/documents/{id}/download` returns them. PDF/JPG/PNG only, 8 MB cap, enforced server-side.
+32. **Electron copies the database on every launch** — `backupDatabase()` in `main.js` runs
+    *before* the backend starts, because that is the only moment the H2 file is not locked.
+    Keeps the last 10 in `~/.axvon/backups`.
+33. **Token refresh renews once, then gives up** — `api.js` schedules a refresh five minutes
+    before expiry and, on a 401, tries exactly one `/auth/refresh` before clearing the
+    session. Concurrent 401s share one in-flight refresh, or a burst of failures would
+    produce a burst of refreshes.
+
 ---
 
 ## Common Errors and Fixes
@@ -286,6 +354,28 @@ mvn clean package -DskipTests -X
 ```
 
 ---
+
+## Tests
+```bash
+cd backend && mvn test            # 45 tests, about 15 seconds
+mvn test -Dtest=PayrollGenerationTest
+```
+`src/test/resources/application.properties` pins an **in-memory** database and a fixed JWT
+secret. Both matter: the real datasource is `~/.axvon/data/axvondb`, and `BackupRestoreTest`
+wipes every table — it must never be pointed at live HR data. The fixed secret stops
+`JwtUtil` rewriting `~/.axvon/jwt.key` and signing every real user out on each test run.
+
+| Suite | Covers |
+|-------|--------|
+| `PayrollGenerationTest` | rates read from settings, loss of pay, half days, approved-leave exemption, ESI ceiling, idempotent runs |
+| `LeaveBalanceTest` | balance moves only on a status transition, quota enforcement, untracked types |
+| `AuthorizationTest` | the leave-authorisation rule, salary masking, role denials, 401 vs 403 |
+| `BackupRestoreTest` | export/restore round trip, restoring over live data, documents and settings |
+| `AuditAndSalaryTest` | salary history from both doors, audit trail, cascade deletes, resignation flow |
+
+The tests are **not** `@Transactional`. A rollback-per-test wrapper would hide the exact
+defect class they exist for — the restore bug only appeared because flush ordering
+misbehaves when work actually commits. Each test wipes the tables itself instead.
 
 ## Environment Requirements
 | Tool | Version | Check |

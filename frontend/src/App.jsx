@@ -1,7 +1,7 @@
-import{useState,useEffect,useCallback}from'react'
+import{useState,useEffect,useCallback,useRef}from'react'
 // The package exposes no root entry — the browser build is the one that reads a File.
 import readXlsxFile from'read-excel-file/browser'
-import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI,userAPI,setupAPI,rosterAPI}from'./services/api'
+import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI,userAPI,setupAPI,rosterAPI,settingsAPI,auditAPI,backupAPI,salaryAPI,resignationAPI,documentAPI,notificationAPI,meAPI,scheduleRefresh,stopRefresh}from'./services/api'
 import{saveReportAs,canSaveLocally,openReportsFolder}from'./services/exporters'
 // PDF text extraction for the attendance roster import.
 // The worker is inlined (?worker&inline → blob URL) on purpose: the packaged app
@@ -49,6 +49,81 @@ const Sel=({value,onChange,children})=><select value={value} onChange={e=>onChan
 const FormFoot=({onSave,busy,label})=><div style={{display:'flex',justifyContent:'flex-end',gap:9,marginTop:14,paddingTop:14,borderTop:'1px solid #E2E8F0'}}><BtnO onClick={closeModal}>Cancel</BtnO><Btn onClick={onSave} disabled={busy}>{busy?'Saving…':label}</Btn></div>
 const St=({label,value,sub,color='#14B8A6'})=><div style={{background:'#fff',borderRadius:13,border:'1px solid #E2E8F0',padding:'18px 20px',borderTop:`3px solid ${color}`}}><div style={{fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>{label}</div><div style={{fontSize:26,fontWeight:900,letterSpacing:'-.5px'}}>{value}</div>{sub&&<div style={{fontSize:12,color:'#94A3B8',marginTop:5}}>{sub}</div>}</div>
 const PH=({title,sub,children})=><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:20,flexWrap:'wrap',gap:12}}><div><div style={{fontSize:21,fontWeight:900,letterSpacing:'-.5px'}}>{title}</div>{sub&&<div style={{fontSize:13,color:'#64748B',marginTop:2}}>{sub}</div>}</div><div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{children}</div></div>
+
+// ── Table furniture, shared by every module ──────────────────────────
+// Grey bars in the real column layout while data loads. An empty table body during a
+// fetch reads as "no records", which is a different and alarming statement.
+const Skeleton=({cols,rows=6})=><tbody>{Array.from({length:rows},(_,r)=><tr key={r} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+  {Array.from({length:cols},(_,c)=><td key={c} style={{padding:'13px 14px'}}>
+    <div style={{height:11,borderRadius:5,background:'#F1F5F9',width:c===0?'70%':'45%',animation:'pulse 1.3s ease-in-out infinite'}}/>
+  </td>)}
+</tr>)}</tbody>
+const Empty=({icon='📭',title,sub,children})=><div style={{padding:'46px 24px',textAlign:'center'}}>
+  <div style={{fontSize:32,marginBottom:10}}>{icon}</div>
+  <div style={{fontWeight:800,fontSize:15,marginBottom:5}}>{title}</div>
+  {sub&&<div style={{fontSize:13,color:'#64748B',lineHeight:1.7,maxWidth:430,margin:'0 auto 14px'}}>{sub}</div>}
+  {children&&<div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>{children}</div>}
+</div>
+
+const PAGE_SIZES=[10,25,50]
+// Slices a list for display and keeps the page in range when the list shrinks under
+// it — deleting the last row of page 4 must not leave you staring at a blank page 4.
+function usePager(items,initial=10){
+  const[size,setSize]=useState(initial)
+  const[page,setPage]=useState(0)
+  const total=items.length
+  const pages=Math.max(1,Math.ceil(total/size))
+  const current=Math.min(page,pages-1)
+  useEffect(()=>{if(page!==current)setPage(current)},[page,current])
+  useEffect(()=>{setPage(0)},[size,total===0])
+  const start=current*size
+  return{rows:items.slice(start,start+size),page:current,setPage,size,setSize,total,pages,start}
+}
+function Pager({p}){
+  if(!p.total) return null
+  const from=p.start+1,to=Math.min(p.start+p.size,p.total)
+  const btn=(label,onClick,disabled)=><button onClick={onClick} disabled={disabled} style={{background:disabled?'#F8FAFC':'#fff',border:'1px solid #E2E8F0',borderRadius:8,padding:'5px 11px',fontSize:12,fontWeight:600,cursor:disabled?'not-allowed':'pointer',color:disabled?'#CBD5E1':'#334155',fontFamily:'inherit'}}>{label}</button>
+  return<div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'10px 14px',borderTop:'1px solid #E2E8F0',flexWrap:'wrap'}}>
+    <div style={{fontSize:12,color:'#64748B'}}>Showing <b style={{color:'#0F172A'}}>{from}–{to}</b> of <b style={{color:'#0F172A'}}>{p.total}</b> records</div>
+    <div style={{display:'flex',alignItems:'center',gap:7}}>
+      <select value={p.size} onChange={e=>p.setSize(Number(e.target.value))} style={{border:'1px solid #E2E8F0',borderRadius:8,padding:'5px 8px',fontSize:12,fontFamily:'inherit',outline:'none'}}>
+        {PAGE_SIZES.map(n=><option key={n} value={n}>{n} / page</option>)}
+      </select>
+      {btn('‹ Prev',()=>p.setPage(p.page-1),p.page===0)}
+      <span style={{fontSize:12,color:'#64748B',minWidth:64,textAlign:'center'}}>Page {p.page+1} of {p.pages}</span>
+      {btn('Next ›',()=>p.setPage(p.page+1),p.page>=p.pages-1)}
+    </div>
+  </div>
+}
+
+// One confirmation dialog for every destructive or expensive action. Replaces
+// window.confirm(), which Electron renders as a bare system box with no context —
+// and which reads identically whether you are deleting one row or the whole table.
+function ConfirmBox({message,detail,danger='Delete',tone='#DC2626',onConfirm}){
+  const[busy,setBusy]=useState(false)
+  const go=async()=>{
+    if(busy) return
+    setBusy(true)
+    try{ await onConfirm() } finally { setBusy(false) }
+  }
+  return<div>
+    <div style={{fontSize:14,lineHeight:1.65,marginBottom:detail?8:16}}>{message}</div>
+    {detail&&<div style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:10,padding:'11px 14px',fontSize:12.5,color:'#64748B',lineHeight:1.6,marginBottom:16}}>{detail}</div>}
+    <div style={{display:'flex',justifyContent:'flex-end',gap:9,paddingTop:14,borderTop:'1px solid #E2E8F0'}}>
+      <BtnO onClick={closeModal}>Cancel</BtnO>
+      <button onClick={go} disabled={busy} style={{background:tone,border:'none',borderRadius:9,padding:'9px 18px',color:'#fff',fontSize:13,fontWeight:700,cursor:busy?'wait':'pointer',fontFamily:'inherit',opacity:busy?.7:1}}>{busy?'Working…':danger}</button>
+    </div>
+  </div>
+}
+const confirmAction=({title,message,detail,danger,tone,onConfirm})=>
+  openModal(title,<ConfirmBox message={message} detail={detail} danger={danger} tone={tone} onConfirm={onConfirm}/>)
+
+// ── Company settings cache ───────────────────────────────────────────
+// Payslips, the sidebar and the window footer all want the company's own name.
+// Loaded once when the shell mounts and read synchronously afterwards.
+let _company={companyName:'AXVON',currencySymbol:'₹'}
+const company=()=>_company
+const setCompany=c=>{ if(c) _company={..._company,...c} }
 
 let _setT=null
 const toast=(msg,type='success')=>{if(_setT)_setT(p=>[...p,{id:Date.now(),msg,type}])}
@@ -117,12 +192,23 @@ const OFFICE=['SUPER_ADMIN','HR_ADMIN']
 const OFFICE_MGR=['SUPER_ADMIN','HR_ADMIN','MANAGER']
 const NAV=[
   {g:'Overview',items:[{id:'dashboard',l:'Dashboard',i:'📊'}]},
-  {g:'Workforce',items:[{id:'employees',l:'Employees',i:'👥'},{id:'attendance',l:'Attendance',i:'🕐',roles:OFFICE_MGR},{id:'leave',l:'Leave',i:'🌴'},{id:'payroll',l:'Payroll',i:'💰',roles:OFFICE}]},
+  // Self-service. Open to every role — a manager has their own payslip too — and it
+  // is where an EMPLOYEE account lands, because the office modules are not theirs.
+  {g:'My Workspace',items:[
+    {id:'myprofile',l:'My Profile',i:'🪪'},
+    {id:'myleave',l:'My Leave',i:'🗓'},
+    {id:'myattendance',l:'My Attendance',i:'⏱'},
+    {id:'mypayslips',l:'My Payslips',i:'🧾'}
+  ]},
+  {g:'Workforce',items:[{id:'employees',l:'Employees',i:'👥'},{id:'attendance',l:'Attendance',i:'🕐',roles:OFFICE_MGR},{id:'leave',l:'Leave',i:'🌴'},{id:'payroll',l:'Payroll',i:'💰',roles:OFFICE},{id:'resignations',l:'Resignations',i:'🚪',roles:OFFICE}]},
   {g:'Talent',items:[{id:'recruitment',l:'Recruitment',i:'🎯',roles:OFFICE},{id:'performance',l:'Performance',i:'⭐',roles:OFFICE_MGR}]},
   {g:'Organisation',items:[{id:'departments',l:'Departments',i:'🏢'},{id:'holidays',l:'Holidays',i:'📅'}]},
   {g:'Insights',items:[{id:'reports',l:'Reports',i:'📁',roles:OFFICE_MGR}]},
-  {g:'System',items:[{id:'bulk',l:'Bulk Import',i:'⬆',roles:OFFICE},{id:'users',l:'Users & Access',i:'🔑',roles:['SUPER_ADMIN']},{id:'admin',l:'Admin & Delete',i:'⚙',roles:['SUPER_ADMIN']},{id:'about',l:'About',i:'★'}]}
+  {g:'System',items:[{id:'bulk',l:'Bulk Import',i:'⬆',roles:OFFICE},{id:'settings',l:'Company Settings',i:'🏛',roles:['SUPER_ADMIN']},{id:'users',l:'Users & Access',i:'🔑',roles:['SUPER_ADMIN']},{id:'audit',l:'Audit Log',i:'📜',roles:['SUPER_ADMIN']},{id:'admin',l:'Admin & Delete',i:'⚙',roles:['SUPER_ADMIN']},{id:'about',l:'About',i:'★'}]}
 ]
+// Where each role lands after signing in. An employee has no business opening on a
+// dashboard of company-wide counters they cannot act on.
+const homeFor=role=>role==='EMPLOYEE'?'myprofile':'dashboard'
 // The endpoints enforce this too — hiding the entries just avoids offering people
 // buttons that will only ever answer 403.
 const navFor=role=>NAV.map(g=>({...g,items:g.items.filter(i=>!i.roles||i.roles.includes(role))})).filter(g=>g.items.length)
@@ -234,11 +320,29 @@ function Dashboard({user}){
       <div style={{display:'flex',gap:9}}><button onClick={()=>window.navTo&&window.navTo('employees')} style={{padding:'9px 18px',borderRadius:9,fontSize:13,fontWeight:700,cursor:'pointer',border:'none',background:'#14B8A6',color:'#fff',fontFamily:'inherit'}}>+ Add Employee</button></div>
     </div>
     {failed&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',color:'#B91C1C',fontSize:13,padding:'11px 15px',borderRadius:11,marginBottom:14}}>Could not reach the backend — these figures are unavailable, not zero. Check that AXVON's backend is running on port 17823.</div>}
-    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:13,marginBottom:18}}>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:13,marginBottom:18}}>
       <St label="Total Employees" value={v('totalEmployees')} sub="All departments" color="#14B8A6"/>
       <St label="Active Staff" value={v('activeEmployees')} sub="Currently working" color="#22C55E"/>
       <St label="Pending Leaves" value={v('pendingLeaves')} sub="Awaiting approval" color="#F59E0B"/>
+      <St label="Resignations" value={v('pendingResignations')} sub="Awaiting a decision" color="#EF4444"/>
       <St label="Departments" value={v('totalDepartments')} sub="Configured" color="#3B82F6"/>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:16}}>
+      <Card style={{padding:'20px 22px'}}>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>Headcount by Department</div>
+        <DeptBars rows={stats?.byDepartment||[]} failed={failed}/>
+      </Card>
+      <Card style={{padding:'20px 22px'}}>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>Attendance — last 7 days</div>
+        <div style={{fontSize:12,color:'#94A3B8',marginBottom:14}}>Share of marked people present or working from home</div>
+        <TrendBars rows={stats?.attendanceTrend||[]} failed={failed}/>
+      </Card>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:16}}>
+      <PeopleCard title="Birthdays this week" icon="🎂" rows={stats?.birthdays||[]}
+        empty="Nobody has a birthday in the next seven days. Add dates of birth on the employee form to see them here."/>
+      <PeopleCard title="Work anniversaries this week" icon="🎉" rows={stats?.anniversaries||[]}
+        empty="No work anniversaries in the next seven days."/>
     </div>
     <Card style={{padding:'20px 22px'}}>
       <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>Quick Actions</div>
@@ -249,7 +353,59 @@ function Dashboard({user}){
   </div>
 }
 
-function Employees(){
+// Horizontal bars, scaled to the largest department so a small company still reads.
+function DeptBars({rows,failed}){
+  if(failed) return<div style={{fontSize:13,color:'#94A3B8'}}>Unavailable — the backend did not answer.</div>
+  if(!rows.length) return<div style={{fontSize:13,color:'#94A3B8'}}>No departments configured yet.</div>
+  const max=Math.max(...rows.map(r=>r.count),1)
+  return<div style={{display:'flex',flexDirection:'column',gap:7}}>
+    {rows.map(d=><div key={d.name} style={{display:'flex',alignItems:'center',gap:10}}>
+      <div style={{width:118,fontSize:12,color:'#64748B',textAlign:'right',flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={d.name}>{d.name}</div>
+      <div style={{flex:1,height:18,background:'#F1F5F9',borderRadius:5,overflow:'hidden'}}><div style={{width:`${Math.round(d.count*100/max)}%`,height:'100%',background:'#14B8A6',borderRadius:5,minWidth:d.count?4:0}}/></div>
+      <div style={{width:24,fontSize:12,fontWeight:700}}>{d.count}</div>
+    </div>)}
+  </div>
+}
+// A column per day. A day nobody marked is drawn hollow and labelled "—", because
+// "not recorded" and "everybody was absent" must not look the same.
+function TrendBars({rows,failed}){
+  if(failed) return<div style={{fontSize:13,color:'#94A3B8'}}>Unavailable — the backend did not answer.</div>
+  if(!rows.length) return<div style={{fontSize:13,color:'#94A3B8'}}>No attendance recorded yet.</div>
+  return<div style={{display:'flex',alignItems:'flex-end',gap:8,height:130}}>
+    {rows.map(d=>{
+      const has=d.rate!=null
+      const h=has?Math.max(4,Math.round(d.rate*0.9)):0
+      const c=!has?'#E2E8F0':d.rate>=80?'#22C55E':d.rate>=50?'#F59E0B':'#EF4444'
+      return<div key={d.date} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:5}}>
+        <div style={{fontSize:10,fontWeight:700,color:has?'#334155':'#CBD5E1'}}>{has?d.rate+'%':'—'}</div>
+        <div title={`${d.present} of ${d.marked} marked`} style={{width:'100%',height:96,background:'#F8FAFC',borderRadius:6,display:'flex',alignItems:'flex-end',overflow:'hidden'}}>
+          <div style={{width:'100%',height:`${h}%`,background:c,borderRadius:has?'6px 6px 0 0':0,border:has?'none':'1px dashed #E2E8F0'}}/>
+        </div>
+        <div style={{fontSize:10,color:'#94A3B8'}}>{new Date(d.date+'T00:00:00').toLocaleDateString(undefined,{weekday:'short'})}</div>
+      </div>
+    })}
+  </div>
+}
+function PeopleCard({title,icon,rows,empty}){
+  return<Card style={{padding:'20px 22px'}}>
+    <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>{icon} {title}</div>
+    {!rows.length?<div style={{fontSize:12.5,color:'#94A3B8',lineHeight:1.6}}>{empty}</div>
+    :<div style={{display:'flex',flexDirection:'column',gap:8}}>
+      {rows.map((r,i)=><div key={i} style={{display:'flex',alignItems:'center',gap:10}}>
+        <Av name={r.name} size={28}/>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.name}{r.years?<span style={{color:'#94A3B8',fontWeight:400}}> · {r.years} yrs</span>:null}</div>
+          <div style={{fontSize:11,color:'#94A3B8'}}>{r.department||'—'}</div>
+        </div>
+        <span style={{fontSize:11,fontWeight:700,color:r.daysAway===0?'#14B8A6':'#64748B',background:r.daysAway===0?'rgba(20,184,166,.12)':'#F8FAFC',borderRadius:20,padding:'3px 10px',whiteSpace:'nowrap'}}>
+          {r.daysAway===0?'Today':r.daysAway===1?'Tomorrow':prettyDate(r.date)}
+        </span>
+      </div>)}
+    </div>}
+  </Card>
+}
+
+function Employees({me}){
   const[emps,setEmps]=useState([]);const[depts,setDepts]=useState([]);const[loading,setLoading]=useState(true);const[q,setQ]=useState('');const[saving,setSaving]=useState(false)
   const load=useCallback(()=>{setLoading(true);employeeAPI.getAll().then(r=>setEmps(r.data.data||[])).catch(()=>toast('Failed to load','error')).finally(()=>setLoading(false))},[])
   useEffect(()=>{load()},[load])
@@ -274,6 +430,8 @@ function Employees(){
         {[['empId','Emp ID'],['firstName','First Name *'],['lastName','Last Name *'],['email','Email *'],['phone','Phone'],['designation','Designation'],['location','Location'],['manager','Manager']].map(([k,l])=><Fld key={k} label={l}><Inp value={f[k]||''} onChange={v=>{f={...f,[k]:v}}}/></Fld>)}
         <Fld label="Basic Salary (₹)"><Inp type="number" value={f.basicSalary||''} onChange={v=>{f={...f,basicSalary:v}}}/></Fld>
         <Fld label="Join Date"><Inp type="date" value={f.joinDate||''} onChange={v=>{f={...f,joinDate:v}}}/></Fld>
+        {/* Optional, and the only thing the dashboard's birthday list can work from. */}
+        <Fld label="Date of Birth"><Inp type="date" value={f.dateOfBirth||''} onChange={v=>{f={...f,dateOfBirth:v}}}/></Fld>
         <Fld label="Status"><select defaultValue={f.status||'Active'} onChange={e=>{f={...f,status:e.target.value}}} style={{width:'100%',border:'1.5px solid #E2E8F0',borderRadius:9,padding:'9px 12px',fontSize:13,outline:'none'}}><option>Active</option><option>On_Leave</option><option>Inactive</option><option>Terminated</option></select></Fld>
         <Fld label="Gender"><select defaultValue={f.gender||''} onChange={e=>{f={...f,gender:e.target.value}}} style={{width:'100%',border:'1.5px solid #E2E8F0',borderRadius:9,padding:'9px 12px',fontSize:13,outline:'none'}}><option value="">Select</option><option>Male</option><option>Female</option><option>Other</option></select></Fld>
         <Fld label="Department"><select defaultValue={e?.department?.id||''} onChange={ev=>{f={...f,departmentId:ev.target.value||null}}} style={{width:'100%',border:'1.5px solid #E2E8F0',borderRadius:9,padding:'9px 12px',fontSize:13,outline:'none'}}><option value="">Unassigned</option>{depts.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></Fld>
@@ -284,43 +442,71 @@ function Employees(){
       </div>
     </div>
   }
-  const del=async(id)=>{if(!confirm('Delete this employee?'))return;try{await employeeAPI.delete(id);toast('Deleted','warn');load()}catch{toast('Error','error')}}
+  const del=e=>confirmAction({
+    title:'Delete employee',
+    message:<>Delete <b>{e.firstName} {e.lastName}</b>?</>,
+    detail:'Their payroll, attendance, leave, reviews, documents and salary history are deleted with them. This cannot be undone.',
+    danger:'Delete employee',
+    onConfirm:async()=>{
+      try{await employeeAPI.delete(e.id);toast('Deleted','warn');closeModal();load()}
+      catch(err){toast(err.response?.data?.message||'Error','error')}
+    }})
+  const canPay=me?.role==='SUPER_ADMIN'||me?.role==='HR_ADMIN'
+  const p=usePager(filtered)
   return<div>
     <PH title="Employees" sub={`${emps.length} people · live from database`}><BtnO onClick={()=>exportReport('employees','csv')}>⬇ Export CSV</BtnO><Btn onClick={()=>openModal('Add New Employee',empForm(null))}>+ Add Employee</Btn></PH>
     <Card style={{padding:12,marginBottom:13}}><Inp value={q} onChange={setQ} placeholder="Search name, ID or email…"/></Card>
     <Card>
-      {loading?<Spin/>:<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
         <thead><tr style={{background:'#F8FAFC'}}>{['Employee','ID','Department','Designation','Location','Salary','Status','Actions'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
-        <tbody>{filtered.map(e=><tr key={e.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={ev=>ev.currentTarget.style.background='#F8FAFC'} onMouseOut={ev=>ev.currentTarget.style.background=''}>
+        {loading?<Skeleton cols={8}/>:<tbody>{p.rows.map(e=><tr key={e.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={ev=>ev.currentTarget.style.background='#F8FAFC'} onMouseOut={ev=>ev.currentTarget.style.background=''}>
           <td style={{padding:'11px 14px'}}><div style={{display:'flex',alignItems:'center',gap:10}}><Av name={`${e.firstName} ${e.lastName}`} size={34}/><div><div style={{fontWeight:600}}>{e.firstName} {e.lastName}</div><div style={{fontSize:11,color:'#94A3B8'}}>{e.email}</div></div></div></td>
           <td style={{padding:'11px 14px'}}><span style={{fontFamily:'monospace',fontSize:11,color:'#64748B',background:'#F8FAFC',padding:'2px 7px',borderRadius:4}}>{e.empId}</span></td>
           <td style={{padding:'11px 14px'}}>{e.department?.name||'—'}</td>
           <td style={{padding:'11px 14px'}}>{e.designation||'—'}</td>
           <td style={{padding:'11px 14px'}}>{e.location||'—'}</td>
-          <td style={{padding:'11px 14px',fontWeight:600}}>{inr(e.basicSalary)}</td>
+          {/* Blank rather than ₹0 when the server withheld it — an employee below HR
+              is not being told this colleague earns nothing. */}
+          <td style={{padding:'11px 14px',fontWeight:600}}>{e.basicSalary==null?<span style={{color:'#CBD5E1'}}>—</span>:inr(e.basicSalary)}</td>
           <td style={{padding:'11px 14px'}}><Badge label={e.status}/></td>
-          <td style={{padding:'11px 14px',textAlign:'right'}}><div style={{display:'inline-flex',gap:5}}>
+          <td style={{padding:'11px 14px',textAlign:'right'}}><div style={{display:'inline-flex',gap:5,flexWrap:'wrap',justifyContent:'flex-end'}}>
             <BtnO onClick={()=>openModal('Edit Employee',empForm(e))} style={{padding:'5px 11px',fontSize:12}}>Edit</BtnO>
-            <BtnD onClick={()=>del(e.id)}>🗑</BtnD>
+            {canPay&&<BtnO onClick={()=>openModal(`Salary — ${e.firstName} ${e.lastName}`,<SalaryPanel emp={e} onDone={load}/>)} style={{padding:'5px 11px',fontSize:12}}>₹ Salary</BtnO>}
+            <BtnO onClick={()=>openModal(`Documents — ${e.firstName} ${e.lastName}`,<DocumentsPanel emp={e} canEdit={canPay}/>)} style={{padding:'5px 11px',fontSize:12}}>📎 Docs</BtnO>
+            <BtnD onClick={()=>del(e)}>🗑</BtnD>
           </div></td>
         </tr>)}
-        {!filtered.length&&<tr><td colSpan={8} style={{padding:48,textAlign:'center',color:'#94A3B8'}}>No employees found</td></tr>}
-        </tbody>
-      </table></div>}
+        </tbody>}
+      </table></div>
+      {!loading&&!filtered.length&&(q.trim()
+        ?<Empty icon="🔍" title={`No employee matches “${q}”`} sub="Try part of a name, an employee ID or an email address."/>
+        :<Empty icon="👥" title="No employees yet" sub="Add your first employee, or bring a whole spreadsheet in through Bulk Import.">
+          <Btn onClick={()=>openModal('Add New Employee',empForm(null))}>+ Add Employee</Btn>
+          <BtnO onClick={()=>window.navTo&&window.navTo('bulk')}>⬆ Bulk Import</BtnO>
+        </Empty>)}
+      <Pager p={p}/>
     </Card>
   </div>
 }
 
 const LEAVE_TYPES=['Casual','Sick','Earned','Unpaid','Maternity','Paternity']
-function LeaveForm({emps,onDone}){
-  const[f,setF]=useState({employeeId:'',leaveType:'Casual',fromDate:'',toDate:'',reason:''})
+// `canOthers` mirrors the server: only Super Admin and HR Admin may file leave on
+// somebody else's behalf. For everyone else the employee is fixed to themselves, so
+// the form cannot even express a request the API would reject.
+function LeaveForm({emps,onDone,canOthers=true,meEmp=null,balances=[]}){
+  const[f,setF]=useState({employeeId:canOthers?'':(meEmp?.id||''),leaveType:'Casual',fromDate:'',toDate:'',reason:''})
   const[busy,setBusy]=useState(false)
   // Inclusive of both end dates — a single-day leave is 1 day, not 0.
   const days=f.fromDate&&f.toDate?Math.floor((new Date(f.toDate)-new Date(f.fromDate))/86400000)+1:0
+  // Only meaningful for the person's own balances; HR filing for somebody else sees
+  // no figure rather than a misleading one.
+  const bal=balances.find(b=>b.leaveType===f.leaveType)
+  const showBal=bal&&(!canOthers||String(f.employeeId)===String(meEmp?.id))
   const submit=async()=>{
     if(!f.employeeId){toast('Select an employee','warn');return}
     if(!f.fromDate||!f.toDate){toast('Pick both dates','warn');return}
     if(days<1){toast('To date must be on or after the from date','warn');return}
+    if(showBal&&days>bal.remaining){toast(`Only ${bal.remaining} days of ${f.leaveType} leave remain`,'warn');return}
     setBusy(true)
     try{
       await leaveAPI.apply({employeeId:Number(f.employeeId),leaveType:f.leaveType,fromDate:f.fromDate,toDate:f.toDate,totalDays:days,reason:f.reason.trim()||'Not stated'})
@@ -329,7 +515,13 @@ function LeaveForm({emps,onDone}){
     finally{setBusy(false)}
   }
   return<div>
-    <Fld label="Employee *"><Sel value={f.employeeId} onChange={v=>setF({...f,employeeId:v})}><option value="">— Select —</option>{emps.map(e=><option key={e.id} value={e.id}>{e.firstName} {e.lastName} ({e.empId})</option>)}</Sel></Fld>
+    {canOthers
+      ?<Fld label="Employee *"><Sel value={f.employeeId} onChange={v=>setF({...f,employeeId:v})}><option value="">— Select —</option>{emps.map(e=><option key={e.id} value={e.id}>{e.firstName} {e.lastName} ({e.empId})</option>)}</Sel></Fld>
+      :<Fld label="Employee"><Inp value={meEmp?`${meEmp.firstName} ${meEmp.lastName} (${meEmp.empId||'—'})`:'Your login is not linked to an employee record'} onChange={()=>{}} style={{background:'#F8FAFC',color:'#64748B'}}/></Fld>}
+    {showBal&&<div style={{background:bal.remaining>0?'rgba(20,184,166,.08)':'rgba(239,68,68,.07)',border:`1px solid ${bal.remaining>0?'rgba(20,184,166,.25)':'rgba(239,68,68,.25)'}`,borderRadius:10,padding:'9px 13px',fontSize:12.5,marginBottom:13,color:bal.remaining>0?'#0F766E':'#B91C1C'}}>
+      <b>{bal.remaining}</b> of {bal.totalAllowed} days of {f.leaveType} leave remaining for {bal.year}
+      {days>0&&<> · this request uses <b>{days}</b></>}
+    </div>}
     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
       <Fld label="Leave Type"><Sel value={f.leaveType} onChange={v=>setF({...f,leaveType:v})}>{LEAVE_TYPES.map(t=><option key={t} value={t}>{t}</option>)}</Sel></Fld>
       <Fld label="Total Days"><Inp value={days?`${days} day${days>1?'s':''}`:'—'} onChange={()=>{}} style={{background:'#F8FAFC',color:'#64748B'}}/></Fld>
@@ -340,27 +532,69 @@ function LeaveForm({emps,onDone}){
     <FormFoot onSave={submit} busy={busy} label="Submit Request"/>
   </div>
 }
-function Leave(){
+function Leave({me}){
   const[lvs,setLvs]=useState([]);const[emps,setEmps]=useState([]);const[loading,setLoading]=useState(true)
+  const[q,setQ]=useState('');const[bals,setBals]=useState([]);const[meEmp,setMeEmp]=useState(null)
+  const canOthers=me?.role==='SUPER_ADMIN'||me?.role==='HR_ADMIN'
+  const canDecide=canOthers||me?.role==='MANAGER'
   const load=useCallback(()=>{setLoading(true);leaveAPI.getAll().then(r=>setLvs(r.data.data||[])).catch(()=>setLvs([])).finally(()=>setLoading(false))},[])
   useEffect(()=>{load()},[load])
   useEffect(()=>{employeeAPI.getAll().then(r=>setEmps(r.data.data||[])).catch(()=>setEmps([]))},[])
-  const approve=async(id)=>{try{await leaveAPI.approve(id);toast('Leave approved!');load()}catch{toast('Error','error')}}
-  const reject=async(id)=>{try{await leaveAPI.reject(id,'Rejected');toast('Leave rejected','warn');load()}catch{toast('Error','error')}}
-  const del=async(id)=>{if(!window.confirm('Delete this leave request?'))return;try{await leaveAPI.delete(id);toast('Leave request deleted','warn');load()}catch(e){toast(e.response?.data?.message||'Delete failed','error')}}
+  // Own balances, and the employee record behind this login — the apply form needs
+  // both, and the server is the only thing that can say which record is ours.
+  const loadMine=useCallback(()=>{
+    leaveAPI.myBalances().then(r=>setBals(r.data.data||[])).catch(()=>setBals([]))
+    meAPI.profile().then(r=>setMeEmp(r.data.data?.employee||null)).catch(()=>setMeEmp(null))
+  },[])
+  useEffect(()=>{loadMine()},[loadMine])
+  const after=()=>{load();loadMine()}
+
+  const approve=l=>confirmAction({
+    title:'Approve leave',
+    message:<>Approve <b>{l.totalDays} day{l.totalDays===1?'':'s'}</b> of {l.leaveType} leave for <b>{l.employee?.firstName} {l.employee?.lastName}</b>?</>,
+    detail:`${prettyDate(l.fromDate)} to ${prettyDate(l.toDate)} · the days come off their ${l.leaveType} balance.`,
+    danger:'Approve', tone:'#16A34A',
+    onConfirm:async()=>{try{await leaveAPI.approve(l.id);toast('Leave approved');closeModal();after()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const reject=l=>confirmAction({
+    title:'Reject leave',
+    message:<>Reject <b>{l.totalDays} day{l.totalDays===1?'':'s'}</b> of {l.leaveType} leave for <b>{l.employee?.firstName} {l.employee?.lastName}</b>?</>,
+    detail:'If it had already been approved, the days go back onto their balance.',
+    danger:'Reject',
+    onConfirm:async()=>{try{await leaveAPI.reject(l.id,'Rejected');toast('Leave rejected','warn');closeModal();after()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const del=l=>confirmAction({
+    title:'Delete leave request',
+    message:<>Delete this {l.leaveType} leave request for <b>{l.employee?.firstName} {l.employee?.lastName}</b>?</>,
+    detail:'This cannot be undone. An approved request gives its days back first.',
+    danger:'Delete',
+    onConfirm:async()=>{try{await leaveAPI.delete(l.id);toast('Leave request deleted','warn');closeModal();after()}catch(e){toast(e.response?.data?.message||'Delete failed','error')}}})
+
   const pend=lvs.filter(l=>l.status==='Pending').length
+  const filtered=lvs.filter(l=>{
+    if(!q.trim()) return true
+    const n=`${l.employee?.firstName||''} ${l.employee?.lastName||''} ${l.leaveType||''}`
+    return norm(n).includes(norm(q))
+  })
+  const p=usePager(filtered)
   return<div>
-    <PH title="Leave Management" sub={`${pend} pending · live from database`}><BtnO onClick={()=>exportReport('leave','csv')}>⬇ Export CSV</BtnO><Btn onClick={()=>openModal('Apply for Leave',<LeaveForm emps={emps} onDone={load}/>)}>+ Apply Leave</Btn></PH>
+    <PH title="Leave Management" sub={`${pend} pending · live from database`}>
+      <BtnO onClick={()=>exportReport('leave','csv')}>⬇ Export CSV</BtnO>
+      <Btn onClick={()=>openModal('Apply for Leave',<LeaveForm emps={emps} onDone={after} canOthers={canOthers} meEmp={meEmp} balances={bals}/>)}>+ Apply Leave</Btn>
+    </PH>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:13,marginBottom:16}}>
       <St label="Pending" value={pend} color="#F59E0B"/>
       <St label="Approved" value={lvs.filter(l=>l.status==='Approved').length} color="#22C55E"/>
       <St label="Rejected" value={lvs.filter(l=>l.status==='Rejected').length} color="#EF4444"/>
       <St label="Total" value={lvs.length} color="#3B82F6"/>
     </div>
+    {bals.length>0&&<Card style={{padding:'16px 20px',marginBottom:14}}>
+      <div style={{fontWeight:700,fontSize:13.5,marginBottom:11}}>Your leave balance · {bals[0]?.year}</div>
+      <BalanceBars balances={bals}/>
+    </Card>}
+    <Card style={{padding:12,marginBottom:13}}><Inp value={q} onChange={setQ} placeholder="Search by employee name or leave type…"/></Card>
     <Card>
-      {loading?<Spin/>:<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
         <thead><tr style={{background:'#F8FAFC'}}>{['Employee','Type','From','To','Days','Reason','Status','Actions'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
-        <tbody>{lvs.map(l=><tr key={l.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background=''}>
+        {loading?<Skeleton cols={8}/>:<tbody>{p.rows.map(l=><tr key={l.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background=''}>
           <td style={{padding:'11px 14px'}}><div style={{display:'flex',alignItems:'center',gap:8}}><Av name={`${l.employee?.firstName} ${l.employee?.lastName}`} size={26}/><span style={{fontWeight:600}}>{l.employee?.firstName} {l.employee?.lastName}</span></div></td>
           <td style={{padding:'11px 14px'}}>{l.leaveType}</td>
           <td style={{padding:'11px 14px'}}>{l.fromDate}</td>
@@ -369,53 +603,151 @@ function Leave(){
           <td style={{padding:'11px 14px',color:'#64748B',fontSize:12}}>{l.reason}</td>
           <td style={{padding:'11px 14px'}}><Badge label={l.status}/></td>
           <td style={{padding:'11px 14px',textAlign:'right'}}><div style={{display:'inline-flex',gap:5}}>
-            {l.status==='Pending'&&<><button onClick={()=>approve(l.id)} style={{background:'#22C55E',border:'none',borderRadius:7,padding:'5px 10px',color:'#fff',cursor:'pointer',fontFamily:'inherit',fontSize:12,fontWeight:700}}>✓ Approve</button><BtnD onClick={()=>reject(l.id)}>Reject</BtnD></>}
-            <BtnD onClick={()=>del(l.id)}>🗑 Delete</BtnD>
+            {canDecide&&l.status==='Pending'&&<><button onClick={()=>approve(l)} style={{background:'#22C55E',border:'none',borderRadius:7,padding:'5px 10px',color:'#fff',cursor:'pointer',fontFamily:'inherit',fontSize:12,fontWeight:700}}>✓ Approve</button><BtnD onClick={()=>reject(l)}>Reject</BtnD></>}
+            {canOthers&&<BtnD onClick={()=>del(l)}>🗑 Delete</BtnD>}
           </div></td>
         </tr>)}
-        {!lvs.length&&<tr><td colSpan={8} style={{padding:48,textAlign:'center',color:'#94A3B8'}}>No leave requests</td></tr>}
-        </tbody>
-      </table></div>}
+        </tbody>}
+      </table></div>
+      {!loading&&!filtered.length&&(q.trim()
+        ?<Empty icon="🔍" title={`No leave request matches “${q}”`} sub="Search by the employee's name or the type of leave."/>
+        :<Empty icon="🌴" title="No leave requests" sub="Nothing has been applied for yet. Requests appear here as soon as somebody submits one."/>)}
+      <Pager p={p}/>
     </Card>
+  </div>
+}
+
+// Shared by the Leave screen and My Leave.
+function BalanceBars({balances}){
+  return<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:11}}>
+    {balances.map(b=>{
+      const pctUsed=b.totalAllowed?Math.min(100,Math.round((b.used||0)*100/b.totalAllowed)):0
+      const c=b.remaining===0?'#EF4444':b.remaining<=2?'#F59E0B':'#14B8A6'
+      return<div key={b.id||b.leaveType} style={{border:'1px solid #E2E8F0',borderRadius:11,padding:'12px 14px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:7}}>
+          <span style={{fontSize:12.5,fontWeight:700}}>{b.leaveType}</span>
+          <span style={{fontSize:12,color:'#64748B'}}><b style={{color:c,fontSize:14}}>{b.remaining}</b> / {b.totalAllowed}</span>
+        </div>
+        <div style={{height:7,background:'#F1F5F9',borderRadius:4,overflow:'hidden'}}>
+          <div style={{width:`${pctUsed}%`,height:'100%',background:c,borderRadius:4}}/>
+        </div>
+        <div style={{fontSize:11,color:'#94A3B8',marginTop:5}}>{b.used||0} used</div>
+      </div>
+    })}
   </div>
 }
 
 function Payroll(){
   const[pay,setPay]=useState([]);const[loading,setLoading]=useState(true);const[month,setMonth]=useState(new Date().toISOString().slice(0,7));const[running,setRunning]=useState(false)
+  const[q,setQ]=useState('');const[cfg,setCfg]=useState(null);const[att,setAtt]=useState(null);const[actives,setActives]=useState(0)
   const load=useCallback(()=>{setLoading(true);payrollAPI.getAll().then(r=>setPay(r.data.data||[])).catch(()=>setPay([])).finally(()=>setLoading(false))},[])
   useEffect(()=>{load()},[load])
-  const generate=async()=>{setRunning(true);try{const r=await payrollAPI.generate({payMonth:month});toast(`Generated: ${r.data.data?.generated||0} employees`);load()}catch(e){toast(e.response?.data?.message||'Error','error')}finally{setRunning(false)}}
-  const markPaid=async(id)=>{try{await payrollAPI.markPaid(id);toast('Marked as paid!');load()}catch{toast('Error','error')}}
-  const del=async(id)=>{if(!window.confirm('Delete this payslip?'))return;try{await payrollAPI.delete(id);toast('Payslip deleted','warn');load()}catch(e){toast(e.response?.data?.message||'Delete failed','error')}}
+  useEffect(()=>{settingsAPI.get().then(r=>setCfg(r.data.data)).catch(()=>setCfg(null))},[])
+  useEffect(()=>{employeeAPI.stats().then(r=>setActives(r.data.data?.active||0)).catch(()=>setActives(0))},[])
+  // The month's attendance is what drives loss of pay, so it belongs on this screen
+  // rather than only inside the calculation.
+  useEffect(()=>{
+    if(!month) return
+    payrollAPI.attendanceSummary(month).then(r=>setAtt(r.data.data)).catch(()=>setAtt(null))
+  },[month,pay.length])
+
+  const runNow=async()=>{
+    setRunning(true)
+    try{
+      const r=await payrollAPI.generate({payMonth:month})
+      const d=r.data.data||{}
+      toast(`${d.generated||0} payslips generated${d.skipped?` · ${d.skipped} already existed`:''}`)
+      closeModal();load()
+    }catch(e){toast(e.response?.data?.message||'Error','error')}
+    finally{setRunning(false)}
+  }
+  const generate=()=>confirmAction({
+    title:'Run payroll',
+    message:<>Generate payroll for <b>{month}</b> for <b>{actives}</b> active employee{actives===1?'':'s'}?</>,
+    detail:`Absent days become loss of pay at ${cfg?.workingDaysPerMonth||26} working days a month; approved leave costs nothing. Anyone who already has a payslip for ${month} is skipped.`,
+    danger:'Run payroll', tone:'#14B8A6',
+    onConfirm:runNow})
+  const markPaid=p=>confirmAction({
+    title:'Mark as paid',
+    message:<>Mark <b>{p.employee?.firstName} {p.employee?.lastName}</b>'s {p.payMonth} payslip of <b>{inr(p.netSalary)}</b> as paid?</>,
+    danger:'Mark paid', tone:'#0D9488',
+    onConfirm:async()=>{try{await payrollAPI.markPaid(p.id);toast('Marked as paid');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const del=p=>confirmAction({
+    title:'Delete payslip',
+    message:<>Delete the {p.payMonth} payslip for <b>{p.employee?.firstName} {p.employee?.lastName}</b>?</>,
+    detail:'This cannot be undone. Running payroll again for that month will recreate it from current figures.',
+    danger:'Delete payslip',
+    onConfirm:async()=>{try{await payrollAPI.delete(p.id);toast('Payslip deleted','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Delete failed','error')}}})
+
+  const filtered=pay.filter(p=>{
+    if(!q.trim()) return true
+    return norm(`${p.employee?.firstName||''} ${p.employee?.lastName||''} ${p.payMonth||''}`).includes(norm(q))
+  })
+  const pg=usePager(filtered)
   const tg=pay.reduce((s,p)=>s+(Number(p.grossSalary)||0),0)
   const tn=pay.reduce((s,p)=>s+(Number(p.netSalary)||0),0)
+  const tl=pay.reduce((s,p)=>s+(Number(p.lopDeduction)||0),0)
   return<div>
     <PH title="Payroll" sub="Salary processing · live from database"><input type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{border:'1px solid #E2E8F0',borderRadius:9,padding:'8px 12px',fontSize:13,outline:'none',fontFamily:'inherit'}}/><BtnO onClick={()=>exportReport('payroll','csv')}>⬇ Export CSV</BtnO><Btn onClick={generate} disabled={running}>{running?'Generating…':'▶ Run Payroll'}</Btn></PH>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:13,marginBottom:16}}>
       <St label="Gross Payable" value={inr(tg)} color="#1E293B"/>
       <St label="Net Payable" value={inr(tn)} color="#22C55E"/>
+      <St label="Loss of Pay" value={inr(tl)} sub="From unauthorised absence" color="#EF4444"/>
       <St label="Total PF" value={inr(pay.reduce((s,p)=>s+(Number(p.pfDeduction)||0),0))} color="#8B5CF6"/>
-      <St label="Total TDS" value={inr(pay.reduce((s,p)=>s+(Number(p.tdsDeduction)||0),0))} color="#F59E0B"/>
     </div>
+    {cfg&&<Card style={{padding:'14px 18px',marginBottom:13}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:9}}>
+        <div style={{fontWeight:700,fontSize:13.5}}>Rates in use</div>
+        <BtnO onClick={()=>window.navTo&&window.navTo('settings')} style={{padding:'4px 10px',fontSize:11.5}}>Edit in Company Settings</BtnO>
+      </div>
+      <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
+        {[['HRA',cfg.hraPercent+'%'],['Special allowance',cfg.specialAllowancePercent+'%'],['PF',cfg.pfPercent+'%'],
+          ['ESI',cfg.esiPercent+'% under '+inr(cfg.esiThreshold)],['Professional tax',inr(cfg.professionalTax)],
+          ['TDS',cfg.tdsPercent+'%'],['Working days / month',cfg.workingDaysPerMonth],
+          ['Absence deduction',cfg.deductAbsentDays===false?'off':'on']].map(([k,v])=>
+          <span key={k} style={{fontSize:11.5,background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:20,padding:'4px 11px'}}>
+            <span style={{color:'#64748B'}}>{k}</span> <b>{v}</b>
+          </span>)}
+      </div>
+    </Card>}
+    {att&&<Card style={{padding:'14px 18px',marginBottom:13}}>
+      <div style={{fontWeight:700,fontSize:13.5,marginBottom:8}}>Attendance for {att.month}</div>
+      <div style={{display:'flex',gap:18,flexWrap:'wrap',fontSize:13}}>
+        <span>✅ Present <b>{att.present}</b></span>
+        <span>🌴 Leave <b>{att.leave}</b></span>
+        <span style={{color:att.absent?'#B91C1C':'inherit'}}>❌ Absent <b>{att.absent}</b></span>
+        <span style={{color:'#94A3B8'}}>across {att.rows?.length||0} active employees</span>
+      </div>
+    </Card>}
+    <Card style={{padding:12,marginBottom:13}}><Inp value={q} onChange={setQ} placeholder="Search by employee name or pay month…"/></Card>
     <Card>
-      {loading?<Spin/>:<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
-        <thead><tr style={{background:'#F8FAFC'}}>{['Employee','Basic','HRA','Gross','Net','Status','Action'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
-        <tbody>{pay.map(p=><tr key={p.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background=''}>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Employee','Days','Basic','HRA','LOP','Gross','Net','Status','Action'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+        {loading?<Skeleton cols={9}/>:<tbody>{pg.rows.map(p=><tr key={p.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background=''}>
           <td style={{padding:'11px 14px'}}><div style={{display:'flex',alignItems:'center',gap:9}}><Av name={`${p.employee?.firstName} ${p.employee?.lastName}`} size={30}/><div><div style={{fontWeight:600}}>{p.employee?.firstName} {p.employee?.lastName}</div><div style={{fontSize:11,color:'#94A3B8'}}>{p.payMonth}</div></div></div></td>
+          <td style={{padding:'11px 14px',fontSize:11.5,color:'#64748B',whiteSpace:'nowrap'}}>
+            {p.payableDays==null?'—':<><b style={{color:'#0F172A',fontSize:13}}>{p.payableDays}</b> paid{p.absentDays?<span style={{color:'#B91C1C'}}> · {p.absentDays} abs</span>:null}</>}
+          </td>
           <td style={{padding:'11px 14px'}}>{inr(p.basicSalary)}</td>
           <td style={{padding:'11px 14px'}}>{inr(p.hra)}</td>
+          <td style={{padding:'11px 14px',color:Number(p.lopDeduction)>0?'#B91C1C':'#CBD5E1'}}>{Number(p.lopDeduction)>0?'−'+inr(p.lopDeduction):'—'}</td>
           <td style={{padding:'11px 14px',fontWeight:700}}>{inr(p.grossSalary)}</td>
           <td style={{padding:'11px 14px',fontWeight:900,color:'#22C55E'}}>{inr(p.netSalary)}</td>
           <td style={{padding:'11px 14px'}}><Badge label={p.status}/></td>
           <td style={{padding:'11px 14px'}}><div style={{display:'inline-flex',gap:5}}>
-            {p.status==='Processed'&&<button onClick={()=>markPaid(p.id)} style={{background:'#14B8A6',border:'none',borderRadius:7,padding:'5px 10px',color:'#fff',cursor:'pointer',fontFamily:'inherit',fontSize:11,fontWeight:700}}>Mark Paid</button>}
-            <BtnD onClick={()=>del(p.id)}>🗑 Delete</BtnD>
+            {p.status==='Processed'&&<button onClick={()=>markPaid(p)} style={{background:'#14B8A6',border:'none',borderRadius:7,padding:'5px 10px',color:'#fff',cursor:'pointer',fontFamily:'inherit',fontSize:11,fontWeight:700}}>Mark Paid</button>}
+            <BtnD onClick={()=>del(p)}>🗑 Delete</BtnD>
             <BtnO onClick={()=>payslip(p)} style={{padding:'5px 10px',fontSize:11}}>⬇ Slip</BtnO>
           </div></td>
         </tr>)}
-        {!pay.length&&<tr><td colSpan={7} style={{padding:48,textAlign:'center',color:'#94A3B8'}}>No payroll records. Click "Run Payroll" to generate.</td></tr>}
-        </tbody>
-      </table></div>}
+        </tbody>}
+      </table></div>
+      {!loading&&!filtered.length&&(q.trim()
+        ?<Empty icon="🔍" title={`No payslip matches “${q}”`} sub="Search by the employee's name or by pay month, e.g. 2026-04."/>
+        :<Empty icon="💰" title="No payroll records" sub={`Pick a month and run payroll. Absent days become loss of pay; approved leave does not.`}>
+          <Btn onClick={generate}>▶ Run Payroll</Btn>
+        </Empty>)}
+      <Pager p={pg}/>
     </Card>
   </div>
 }
@@ -455,7 +787,13 @@ function Departments(){
         <div style={{fontSize:12,color:'#94A3B8',marginBottom:10}}>{d.description||'—'}</div>
         <div style={{display:'flex',gap:6}}>
           <BtnO onClick={()=>openModal('Edit Department',<DeptForm dept={d} onDone={load}/>)} style={{padding:'5px 11px',fontSize:12}}>Edit</BtnO>
-          <BtnD onClick={async()=>{if(!window.confirm(`Delete ${d.name}? Employees in it will become unassigned.`))return;try{const r=await departmentAPI.delete(d.id);toast(`Deleted · ${r.data.data?.unassignedEmployees??0} employees unassigned`,'warn');load()}catch(e){toast(e.response?.data?.message||'Error','error')}}}>🗑 Delete</BtnD>
+          <BtnD onClick={()=>confirmAction({
+            title:'Delete department',
+            message:<>Delete <b>{d.name}</b>?</>,
+            detail:'Employees in this department are kept — they simply become unassigned. Deleting a department never deletes the people in it.',
+            danger:'Delete department',
+            onConfirm:async()=>{try{const r=await departmentAPI.delete(d.id);toast(`Deleted · ${r.data.data?.unassignedEmployees??0} employees unassigned`,'warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}
+          })}>🗑 Delete</BtnD>
         </div>
       </Card>)}
     </div>}
@@ -483,20 +821,33 @@ function HolForm({onDone}){
   </div>
 }
 function Holidays(){
-  const[hols,setHols]=useState([]);const[loading,setLoading]=useState(true)
+  const[hols,setHols]=useState([]);const[loading,setLoading]=useState(true);const[q,setQ]=useState('')
   const load=useCallback(()=>{setLoading(true);holidayAPI.getAll().then(r=>setHols(r.data.data||[])).catch(()=>setHols([])).finally(()=>setLoading(false))},[])
   useEffect(()=>{load()},[load])
   const tc={National:'#3B82F6',Festival:'#F59E0B',Optional:'#22C55E'}
+  const filtered=hols.filter(h=>!q.trim()||norm(`${h.name} ${h.type} ${h.holidayDate}`).includes(norm(q)))
+  const del=h=>confirmAction({
+    title:'Remove holiday',
+    message:<>Remove <b>{h.name}</b> ({prettyDate(h.holidayDate)}) from the calendar?</>,
+    danger:'Remove holiday',
+    onConfirm:async()=>{try{await holidayAPI.delete(h.id);toast('Removed','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
   return<div>
     <PH title="Holidays" sub={`${hols.length} holidays · live from database`}><Btn onClick={()=>openModal('Add Holiday',<HolForm onDone={load}/>)}>+ Add Holiday</Btn></PH>
-    {loading?<Spin/>:<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:11}}>
-      {hols.map(h=>{const c=tc[h.type]||'#94A3B8';const d=new Date(h.holidayDate);return<div key={h.id} style={{display:'flex',gap:13,alignItems:'center',padding:'13px 16px',border:'1px solid #E2E8F0',borderRadius:11,background:'#fff'}}>
+    <Card style={{padding:12,marginBottom:13}}><Inp value={q} onChange={setQ} placeholder="Search holidays by name, type or date…"/></Card>
+    {loading?<Spin/>
+     :!filtered.length?<Card>{q.trim()
+        ?<Empty icon="🔍" title={`No holiday matches “${q}”`} sub="Search by name, by type, or by a date such as 2026-01-26."/>
+        :<Empty icon="📅" title="No holidays yet" sub="Add the company's holiday calendar so everybody can see the year ahead.">
+          <Btn onClick={()=>openModal('Add Holiday',<HolForm onDone={load}/>)}>+ Add Holiday</Btn>
+        </Empty>}</Card>
+     :<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:11}}>
+      {filtered.map(h=>{const c=tc[h.type]||'#94A3B8';const d=new Date(h.holidayDate);return<div key={h.id} style={{display:'flex',gap:13,alignItems:'center',padding:'13px 16px',border:'1px solid #E2E8F0',borderRadius:11,background:'#fff'}}>
         <div style={{width:50,height:50,borderRadius:10,background:c+'15',border:`1px solid ${c}30`,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',flexShrink:0}}>
           <div style={{fontSize:19,fontWeight:900,color:c,lineHeight:1}}>{d.getDate()}</div>
           <div style={{fontSize:9,fontWeight:700,textTransform:'uppercase',color:c,marginTop:1}}>{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]}</div>
         </div>
         <div style={{flex:1}}><div style={{fontWeight:700,marginBottom:5}}>{h.name}</div><Badge label={h.type}/></div>
-        <BtnD onClick={async()=>{if(!window.confirm(`Remove ${h.name}?`))return;try{await holidayAPI.delete(h.id);toast('Removed','warn');load()}catch{toast('Error','error')}}}>🗑</BtnD>
+        <BtnD onClick={()=>del(h)}>🗑</BtnD>
       </div>})}
     </div>}
   </div>
@@ -531,7 +882,7 @@ function CandForm({onDone}){
   </div>
 }
 function Recruitment(){
-  const[cands,setCands]=useState([]);const[loading,setLoading]=useState(true)
+  const[cands,setCands]=useState([]);const[loading,setLoading]=useState(true);const[q,setQ]=useState('')
   const load=useCallback(()=>{setLoading(true);candidateAPI.getAll().then(r=>setCands(r.data.data||[])).catch(()=>setCands([])).finally(()=>setLoading(false))},[])
   useEffect(()=>{load()},[load])
   const stages=CAND_STAGES
@@ -539,6 +890,14 @@ function Recruitment(){
   // Spread the whole candidate: the API overwrites stage, status and notes together,
   // so sending only the changed field would blank the other two.
   const move=async(c,patch)=>{try{await candidateAPI.update(c.id,{...c,...patch});toast('Candidate updated');load()}catch(e){toast(e.response?.data?.message||'Update failed','error')}}
+  const del=c=>confirmAction({
+    title:'Remove candidate',
+    message:<>Remove <b>{c.fullName}</b> from the pipeline?</>,
+    detail:'Their application history is deleted with them. This cannot be undone.',
+    danger:'Remove candidate',
+    onConfirm:async()=>{try{await candidateAPI.delete(c.id);toast('Removed','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const filtered=cands.filter(c=>!q.trim()||norm(`${c.fullName||''} ${c.appliedFor||''} ${c.department||''} ${c.source||''}`).includes(norm(q)))
+  const p=usePager(filtered)
   return<div>
     <PH title="Recruitment" sub={`${cands.length} candidates · live from database`}><Btn onClick={()=>openModal('Add Candidate',<CandForm onDone={load}/>)}>+ Add Candidate</Btn></PH>
     <Card style={{padding:'18px 20px',marginBottom:16}}>
@@ -550,20 +909,26 @@ function Recruitment(){
         </div>})}
       </div>
     </Card>
+    <Card style={{padding:12,marginBottom:13}}><Inp value={q} onChange={setQ} placeholder="Search by candidate name, role, department or source…"/></Card>
     <Card>
-      {loading?<Spin/>:<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
         <thead><tr style={{background:'#F8FAFC'}}>{['Candidate','Applied For','Source','Stage','Status','Actions'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
-        <tbody>{cands.map(c=><tr key={c.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background=''}>
+        {loading?<Skeleton cols={6}/>:<tbody>{p.rows.map(c=><tr key={c.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}} onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background=''}>
           <td style={{padding:'11px 14px'}}><div style={{display:'flex',alignItems:'center',gap:9}}><Av name={c.fullName} size={28}/><span style={{fontWeight:600}}>{c.fullName}</span></div></td>
           <td style={{padding:'11px 14px'}}>{c.appliedFor}</td>
           <td style={{padding:'11px 14px'}}>{c.source}</td>
           <td style={{padding:'11px 14px'}}><select value={c.stage||'Applied'} onChange={e=>move(c,{stage:e.target.value})} style={{...SEL,padding:'4px 8px',fontSize:12,width:'auto'}}>{CAND_STAGES.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></td>
           <td style={{padding:'11px 14px'}}><select value={c.status||'In_Progress'} onChange={e=>move(c,{status:e.target.value})} style={{...SEL,padding:'4px 8px',fontSize:12,width:'auto'}}>{CAND_STATUS.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></td>
-          <td style={{padding:'11px 14px'}}><BtnD onClick={async()=>{if(!window.confirm(`Remove ${c.fullName}?`))return;try{await candidateAPI.delete(c.id);toast('Removed','warn');load()}catch{toast('Error','error')}}}>🗑</BtnD></td>
+          <td style={{padding:'11px 14px'}}><BtnD onClick={()=>del(c)}>🗑</BtnD></td>
         </tr>)}
-        {!cands.length&&<tr><td colSpan={6} style={{padding:48,textAlign:'center',color:'#94A3B8'}}>No candidates</td></tr>}
-        </tbody>
-      </table></div>}
+        </tbody>}
+      </table></div>
+      {!loading&&!filtered.length&&(q.trim()
+        ?<Empty icon="🔍" title={`No candidate matches “${q}”`} sub="Search by name, the role applied for, department or source."/>
+        :<Empty icon="🎯" title="No candidates yet" sub="Add applicants and move them through the pipeline from Applied to Offered.">
+          <Btn onClick={()=>openModal('Add Candidate',<CandForm onDone={load}/>)}>+ Add Candidate</Btn>
+        </Empty>)}
+      <Pager p={p}/>
     </Card>
   </div>
 }
@@ -603,7 +968,12 @@ function Performance(){
     finally{setLoading(false)}
   },[])
   useEffect(()=>{load()},[load])
-  const del=async id=>{if(!window.confirm('Delete this review?'))return;try{await performanceAPI.delete(id);toast('Review deleted','warn');load()}catch(e){toast('Delete failed','error')}}
+  const del=p=>confirmAction({
+    title:'Delete review',
+    message:<>Delete the <b>{p.reviewPeriod||'—'}</b> review for <b>{p.employee?`${p.employee.firstName} ${p.employee.lastName}`:'this employee'}</b>?</>,
+    detail:'The rating, goals and written feedback go with it. This cannot be undone.',
+    danger:'Delete review',
+    onConfirm:async()=>{try{await performanceAPI.delete(p.id);toast('Review deleted','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Delete failed','error')}}})
   return<div>
     <PH title="Performance Management" sub="Reviews and goals — saved to database">
       <Btn onClick={()=>openModal('New Performance Review',<PerfForm emps={emps} onDone={load}/>)}>+ Add Review</Btn>
@@ -625,7 +995,7 @@ function Performance(){
           <td style={{padding:'11px 14px',fontWeight:700,color:(p.goalsAchieved??0)>=(p.goalsSet??0)?'#22C55E':'#F59E0B'}}>{p.goalsAchieved??0}/{p.goalsSet??0}</td>
           <td style={{padding:'11px 14px'}}>{p.rating!=null?<><span style={{color:'#F59E0B',fontSize:14,letterSpacing:1}}>{'★'.repeat(Math.round(p.rating))}{'☆'.repeat(Math.max(0,5-Math.round(p.rating)))}</span><span style={{fontSize:11,color:'#94A3B8',marginLeft:4}}>{p.rating}</span></>:'—'}</td>
           <td style={{padding:'11px 14px'}}><Badge label={p.status}/></td>
-          <td style={{padding:'11px 14px'}}><BtnD onClick={()=>del(p.id)}>Delete</BtnD></td>
+          <td style={{padding:'11px 14px'}}><BtnD onClick={()=>del(p)}>Delete</BtnD></td>
         </tr>)}
         </tbody>
       </table></div>}
@@ -769,13 +1139,62 @@ async function exportReport(key,kind,period){
   }catch(e){toast(e.message||'Export failed','error')}
 }
 
-// A payslip for one row — the "Slip" button used to only raise a toast.
-function payslip(p){
+// A short, stable code printed on the payslip so a bank or a landlord can be told
+// which document they are holding. Derived from the payslip's own figures, so a
+// doctored copy no longer matches the code it carries.
+const verifyCode=p=>{
+  const seed=`${p.id}|${p.payMonth}|${p.employee?.empId||''}|${p.netSalary}`
+  let h=5381
+  for(let i=0;i<seed.length;i++) h=((h*33)^seed.charCodeAt(i))>>>0
+  return 'AXV-'+h.toString(36).toUpperCase().padStart(7,'0').slice(0,7)
+}
+// A payslip for one row, on the company's own letterhead. The photo is best-effort:
+// if the employee has one attached it is embedded, and if not the slip prints without
+// it rather than failing.
+async function payslip(p){
   const name=p.employee?`${p.employee.firstName} ${p.employee.lastName}`:'—'
+  const c=company()
+  let photo=''
+  try{
+    if(p.employee?.id){
+      const docs=(await documentAPI.forEmployee(p.employee.id)).data.data||[]
+      const ph=docs.find(d=>String(d.docType).toLowerCase()==='photo')
+      if(ph){
+        const f=(await documentAPI.download(ph.id)).data.data
+        if(f?.data) photo=`<img src="data:${f.contentType};base64,${f.data}" style="width:74px;height:74px;object-fit:cover;border-radius:8px;border:1px solid #CBD5E1"/>`
+      }
+    }
+  }catch{ /* no photo attached, or not permitted — print without it */ }
+
   const row=(l,v)=>`<tr><td>${esc(l)}</td><td style="text-align:right">${esc(inr(v))}</td></tr>`
+  const lop=Number(p.lopDeduction)>0?row('Loss of Pay ('+(p.absentDays||0)+' absent day'+((p.absentDays||0)===1?'':'s')+')',p.lopDeduction):''
+  const addr=[c.address,c.city,c.state,c.pincode].filter(Boolean).join(', ')
+  const contact=[c.phone,c.email,c.website].filter(Boolean).join(' · ')
+  const logo=c.logo?`<img src="${esc(c.logo)}" style="height:44px;max-width:150px;object-fit:contain"/>`:''
+  const code=verifyCode(p)
   const ok=printDoc(`Payslip ${p.payMonth||''} — ${name}`,`
-    <h1>AXVON HRMS — Payslip</h1>
-    <div class="sub">${esc(name)} · ${esc(p.employee?.empId||'')} · ${esc(p.employee?.designation||'')} · Pay month ${esc(p.payMonth||'')}</div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:2px solid #0F172A;padding-bottom:12px;margin-bottom:14px">
+      <div>
+        ${logo}
+        <h1 style="margin:${logo?'6px':'0'} 0 2px">${esc(c.companyName||'AXVON')}</h1>
+        ${addr?`<div class="sub" style="margin:0">${esc(addr)}</div>`:''}
+        ${contact?`<div class="sub" style="margin:0">${esc(contact)}</div>`:''}
+        ${c.gstin?`<div class="sub" style="margin:0">GSTIN: ${esc(c.gstin)}</div>`:''}
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:15px;font-weight:800">PAYSLIP</div>
+        <div class="sub" style="margin:0">Pay month ${esc(p.payMonth||'')}</div>
+        <div class="sub" style="margin:0">Verification: <b style="font-family:monospace">${esc(code)}</b></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:14px">
+      ${photo}
+      <div>
+        <div style="font-size:14px;font-weight:800">${esc(name)}</div>
+        <div class="sub" style="margin:2px 0 0">${esc(p.employee?.empId||'')} · ${esc(p.employee?.designation||'—')} · ${esc(p.employee?.department?.name||'—')}</div>
+        <div class="sub" style="margin:2px 0 0">Days paid: ${p.payableDays??'—'} · Present ${p.presentDays??'—'} · Leave ${p.leaveDays??'—'} · Absent ${p.absentDays??'—'}</div>
+      </div>
+    </div>
     <table>
       <thead><tr><th>Earnings</th><th style="text-align:right">Amount</th></tr></thead>
       <tbody>
@@ -784,12 +1203,12 @@ function payslip(p){
       </tbody>
       <thead><tr><th>Deductions</th><th style="text-align:right">Amount</th></tr></thead>
       <tbody>
-        ${row('Provident Fund',p.pfDeduction)}${row('ESI',p.esiDeduction)}${row('Professional Tax',p.professionalTax)}${row('TDS',p.tdsDeduction)}
+        ${row('Provident Fund',p.pfDeduction)}${row('ESI',p.esiDeduction)}${row('Professional Tax',p.professionalTax)}${row('TDS',p.tdsDeduction)}${lop}
         <tr><td><b>Total Deductions</b></td><td style="text-align:right"><b>${esc(inr(p.totalDeduction))}</b></td></tr>
       </tbody>
       <tbody><tr><td style="font-size:13px"><b>Net Salary</b></td><td style="text-align:right;font-size:13px"><b>${esc(inr(p.netSalary))}</b></td></tr></tbody>
     </table>
-    <div class="sub" style="margin-top:12px">Status: ${esc(p.status||'')} · This is a computer-generated payslip and needs no signature.</div>`)
+    <div class="sub" style="margin-top:12px">Status: ${esc(p.status||'')} · This is a computer-generated payslip and needs no signature. Quote ${esc(code)} to verify it.</div>`)
   if(ok) toast('Use "Save as PDF" in the print dialog','info')
 }
 function Reports(){
@@ -1332,6 +1751,7 @@ function Admin(){
         <BtnD onClick={()=>del(m)}>{deleting===m.key?'Deleting…':`🗑 Delete All ${m.l}`}</BtnD>
       </Card>)}
     </div>
+    <BackupCard onRestored={refresh}/>
     <Card style={{padding:'20px 22px',borderTop:'4px solid #EF4444',background:'rgba(239,68,68,.02)'}}>
       <div style={{fontWeight:800,fontSize:15,color:'#DC2626',marginBottom:5}}>☢ Full System Reset</div>
       <div style={{fontSize:13,color:'#64748B',marginBottom:16}}>Deletes ALL data across every module. Cannot be undone.</div>
@@ -1656,24 +2076,39 @@ function Attendance(){
   }
   const cnt=s=>Object.values(marks).filter(m=>m.status===s).length
   // Saved rows are deleted server-side; unsaved marks just drop out of local state.
-  const clearMark=async(k)=>{
+  const clearMark=(k,who)=>{
     const m=marks[k]
     if(!m||!m.status){toast('Nothing to clear','warn');return}
-    if(!window.confirm('Clear this attendance record?'))return
+    // An unsaved mark only exists in this form, so drop it without ceremony; a saved
+    // one is a database row and gets the same confirmation as any other delete.
     if(!m.id){setMarks(p=>{const n={...p};delete n[k];return n});toast('Mark cleared','warn');return}
-    try{await attendanceAPI.delete(m.id);toast('Attendance record deleted','warn');load(date)}
-    catch(e){toast(e.response?.data?.message||'Delete failed','error')}
+    confirmAction({
+      title:'Clear attendance',
+      message:<>Clear the saved attendance for <b>{who}</b> on {prettyDate(date)}?</>,
+      detail:'The record is deleted, not set to absent — the day goes back to being unmarked.',
+      danger:'Clear record',
+      onConfirm:async()=>{
+        try{await attendanceAPI.delete(m.id);toast('Attendance record deleted','warn');closeModal();load(date)}
+        catch(e){toast(e.response?.data?.message||'Delete failed','error')}
+      }})
   }
   const openImport=tab=>openModal('Import Employee List',<ImportRoster tab={tab} existing={people} onDone={()=>load(date)}/>)
   const addOne=()=>openModal('Add Employee to Attendance List',<AddRosterPerson onDone={()=>load(date)}/>)
   // Removing an imported name takes its attendance history with it; managed
   // employees are only ever removed from the Employees module.
-  const removePerson=async p=>{
-    if(!window.confirm(`Remove ${p.name} from the attendance list?\n\nTheir attendance records will be deleted too. This does not affect the Employees module.`))return
-    try{await rosterAPI.delete(p.id);toast(`${p.name} removed`,'warn');load(date)}
-    catch(e){toast(e.response?.data?.message||'Could not remove','error')}
-  }
+  const removePerson=p=>confirmAction({
+    title:'Remove from attendance list',
+    message:<>Remove <b>{p.name}</b> from the attendance list?</>,
+    detail:'Their attendance history is deleted with them. This does not touch the Employees module — imported names are a separate list.',
+    danger:'Remove person',
+    onConfirm:async()=>{
+      try{await rosterAPI.delete(p.id);toast(`${p.name} removed`,'warn');closeModal();load(date)}
+      catch(e){toast(e.response?.data?.message||'Could not remove','error')}
+    }})
   const rosterCount=people.filter(p=>p.kind==='roster').length
+  // Quick-mark still applies to everybody the search shows, not just this page —
+  // paging is a view, not a change of scope.
+  const pg=usePager(shown,25)
   return<div>
     <PH title="Attendance" sub="Daily tracking — saved to database">
       <input type="date" value={date} max={today} onChange={e=>setDate(e.target.value)} style={{border:'1.5px solid #E2E8F0',borderRadius:9,padding:'8px 12px',fontSize:13,fontFamily:'inherit',outline:'none'}}/>
@@ -1703,7 +2138,7 @@ function Attendance(){
         </div>
       </div>:<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
         <thead><tr style={{background:'#F8FAFC'}}>{['Employee','Department','Status','Check In','Check Out','Action'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
-        <tbody>{shown.map(p=>{const m=marks[p.key]||{}
+        <tbody>{pg.rows.map(p=>{const m=marks[p.key]||{}
           return<tr key={p.key} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
             <td style={{padding:'9px 14px'}}><div style={{display:'flex',alignItems:'center',gap:9}}><Av name={p.name} size={28}/><div><div style={{fontWeight:600}}>{p.name}</div><div style={{fontSize:11,color:'#94A3B8'}}>{p.sub||'—'}</div></div></div></td>
             <td style={{padding:'9px 14px',color:'#64748B'}}>{p.dept||'—'}</td>
@@ -1713,13 +2148,14 @@ function Attendance(){
             <td style={{padding:'9px 14px'}}><input type="time" value={m.checkIn||''} onChange={ev=>setTime(p.key,'checkIn',ev.target.value)} style={{border:'1px solid #E2E8F0',borderRadius:7,padding:'5px 8px',fontSize:12,fontFamily:'inherit',outline:'none',width:105}}/></td>
             <td style={{padding:'9px 14px'}}><input type="time" value={m.checkOut||''} onChange={ev=>setTime(p.key,'checkOut',ev.target.value)} style={{border:'1px solid #E2E8F0',borderRadius:7,padding:'5px 8px',fontSize:12,fontFamily:'inherit',outline:'none',width:105}}/></td>
             <td style={{padding:'9px 14px'}}><div style={{display:'flex',gap:6}}>
-              {m.status?<BtnD onClick={()=>clearMark(p.key)}>🗑 Clear</BtnD>:<span style={{fontSize:11,color:'#CBD5E1'}}>—</span>}
+              {m.status?<BtnD onClick={()=>clearMark(p.key,p.name)}>🗑 Clear</BtnD>:<span style={{fontSize:11,color:'#CBD5E1'}}>—</span>}
               {p.kind==='roster'&&<BtnD onClick={()=>removePerson(p)}>✕ Remove</BtnD>}
             </div></td>
           </tr>})}
         </tbody>
       </table>
-      {!shown.length&&<div style={{padding:'30px 16px',textAlign:'center',fontSize:13,color:'#94A3B8'}}>No employee matches “{q}”.</div>}
+      {!shown.length&&<Empty icon="🔍" title={`No employee matches “${q}”`} sub="Clear the search to see everybody on the attendance list again."/>}
+      <Pager p={pg}/>
       </div>}
     </Card>
   </div>
@@ -1758,10 +2194,747 @@ function AddRosterPerson({onDone}){
   </div>
 }
 
+// ── Backup & restore ─────────────────────────────────────────────────
+// base64 of a UTF-8 string. btoa() alone throws on anything non-Latin-1, and a
+// company's own name is very often non-Latin-1.
+const toBase64=str=>{
+  const bytes=new TextEncoder().encode(str)
+  let bin=''
+  for(let i=0;i<bytes.length;i+=0x8000) bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000))
+  return btoa(bin)
+}
+// In the desktop app the file goes into ~/.axvon/reports next to the other exports;
+// in a browser it becomes an ordinary download.
+const saveJsonFile=async(filename,text)=>{
+  if(window.electronAPI?.saveReport){
+    return await window.electronAPI.saveReport({filename,base64:toBase64(text)})
+  }
+  const a=document.createElement('a')
+  const url=URL.createObjectURL(new Blob([text],{type:'application/json'}))
+  a.href=url;a.download=filename
+  document.body.appendChild(a);a.click();document.body.removeChild(a)
+  setTimeout(()=>URL.revokeObjectURL(url),10000)
+  return filename
+}
+const LAST_BACKUP_KEY='axvon_last_backup'
+function BackupCard({onRestored}){
+  const[busy,setBusy]=useState('')
+  const[last,setLast]=useState(localStorage.getItem(LAST_BACKUP_KEY)||'')
+  const backup=async()=>{
+    setBusy('export')
+    try{
+      const r=await backupAPI.export()
+      const data=r.data.data
+      const name='axvon_backup_'+ymd(new Date())+'_'+new Date().toTimeString().slice(0,5).replace(':','')+'.json'
+      const where=await saveJsonFile(name,JSON.stringify(data,null,2))
+      const stamp=new Date().toISOString()
+      localStorage.setItem(LAST_BACKUP_KEY,stamp);setLast(stamp)
+      const c=data.counts||{}
+      toast(`Backup saved: ${where} · ${c.employees||0} employees, ${c.attendance||0} attendance rows`)
+    }catch(e){toast(e.response?.data?.message||'Backup failed','error')}
+    finally{setBusy('')}
+  }
+  const pick=async file=>{
+    if(!file) return
+    let parsed
+    try{ parsed=JSON.parse(await file.text()) }
+    catch{ toast('That file is not valid JSON','error'); return }
+    if(parsed.format!=='AXVON-HRMS-BACKUP'){ toast('That is not an AXVON backup file','error'); return }
+    const c=parsed.counts||{}
+    confirmAction({
+      title:'Restore from backup',
+      message:<>Replace all current data with the backup taken on <b>{parsed.exportedAt?new Date(parsed.exportedAt).toLocaleString():'an unknown date'}</b>?</>,
+      detail:`Everything currently in the system — employees, attendance, payroll, leave and the rest — is deleted first and rebuilt from the file (${c.employees||0} employees, ${c.payroll||0} payslips). User accounts are kept, so you stay signed in. There is no undo.`,
+      danger:'Erase and restore',
+      onConfirm:async()=>{
+        setBusy('restore')
+        try{
+          const r=await backupAPI.restore(parsed)
+          toast('Restored: '+Object.entries(r.data.data||{}).map(([k,v])=>`${v} ${k}`).join(', '))
+          closeModal();onRestored&&onRestored()
+        }catch(e){toast(e.response?.data?.message||'Restore failed','error')}
+        finally{setBusy('')}
+      }})
+  }
+  return<Card style={{padding:'20px 22px',marginBottom:16,borderTop:'4px solid #14B8A6'}}>
+    <div style={{fontWeight:800,fontSize:15,marginBottom:5}}>💾 Backup & Restore</div>
+    <div style={{fontSize:13,color:'#64748B',marginBottom:14,lineHeight:1.6}}>
+      One JSON file holding every employee, department, attendance row, payslip, leave request, document and setting.
+      Keep a copy somewhere other than this computer — a reset or a failed disk takes the database with it.
+      {window.electronAPI?<> The desktop app also copies the database into <b>~/.axvon/backups</b> every time it starts.</>:null}
+    </div>
+    <div style={{display:'flex',gap:9,flexWrap:'wrap',alignItems:'center'}}>
+      <Btn onClick={backup} disabled={busy==='export'}>{busy==='export'?'Preparing…':'⬇ Backup Now'}</Btn>
+      <label style={{background:'#fff',border:'1px solid #E2E8F0',borderRadius:9,padding:'9px 14px',fontSize:13,fontWeight:500,cursor:busy?'wait':'pointer',fontFamily:'inherit'}}>
+        {busy==='restore'?'Restoring…':'⬆ Restore from Backup'}
+        <input type="file" accept=".json,application/json" style={{display:'none'}} onChange={e=>{pick(e.target.files?.[0]);e.target.value=''}}/>
+      </label>
+      <span style={{fontSize:12,color:'#94A3B8'}}>
+        {last?<>Last backup from this browser: <b style={{color:'#334155'}}>{new Date(last).toLocaleString()}</b></>:'No backup taken from this browser yet'}
+      </span>
+    </div>
+  </Card>
+}
+
+// ── Salary revision & history ────────────────────────────────────────
+function SalaryPanel({emp,onDone}){
+  const[hist,setHist]=useState(null)
+  const[f,setF]=useState({newSalary:emp.basicSalary??'',effectiveDate:ymd(new Date()),reason:''})
+  const[busy,setBusy]=useState(false)
+  const load=useCallback(()=>{salaryAPI.history(emp.id).then(r=>setHist(r.data.data||[])).catch(()=>setHist([]))},[emp.id])
+  useEffect(()=>{load()},[load])
+  const save=async()=>{
+    if(String(f.newSalary).trim()===''){toast('Enter the new salary','warn');return}
+    if(Number(f.newSalary)===Number(emp.basicSalary)){toast('That is the current salary','warn');return}
+    setBusy(true)
+    try{
+      await salaryAPI.revise({employeeId:emp.id,newSalary:f.newSalary,effectiveDate:f.effectiveDate,reason:f.reason.trim()||'Revision'})
+      toast('Salary revised');load();onDone&&onDone()
+    }catch(e){toast(e.response?.data?.message||'Could not revise salary','error')}
+    finally{setBusy(false)}
+  }
+  return<div>
+    <div style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:11,padding:'12px 15px',marginBottom:15}}>
+      <div style={{fontSize:12,color:'#64748B'}}>Current basic salary</div>
+      <div style={{fontSize:21,fontWeight:900}}>{inr(emp.basicSalary)}</div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+      <Fld label="New Basic Salary (₹) *"><Inp type="number" value={f.newSalary} onChange={v=>setF({...f,newSalary:v})}/></Fld>
+      <Fld label="Effective From"><Inp type="date" value={f.effectiveDate} onChange={v=>setF({...f,effectiveDate:v})}/></Fld>
+    </div>
+    <Fld label="Reason"><Inp value={f.reason} onChange={v=>setF({...f,reason:v})} placeholder="Annual increment / promotion"/></Fld>
+    <div style={{display:'flex',justifyContent:'flex-end',gap:9,marginBottom:18}}>
+      <Btn onClick={save} disabled={busy}>{busy?'Saving…':'Save revision'}</Btn>
+    </div>
+    <div style={{fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:9}}>Salary history</div>
+    {hist===null?<Spin/>
+     :!hist.length?<div style={{fontSize:12.5,color:'#94A3B8',lineHeight:1.6}}>No revisions recorded yet. Every future change — from here or from the employee form — is listed here.</div>
+     :<div style={{border:'1px solid #E2E8F0',borderRadius:10,overflow:'hidden'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Effective','From','To','Change','Reason','By'].map(h=><th key={h} style={{padding:'8px 11px',textAlign:'left',fontSize:10.5,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.4px'}}>{h}</th>)}</tr></thead>
+        <tbody>{hist.map(r=>{
+          const up=Number(r.newSalary)>=Number(r.oldSalary||0)
+          return<tr key={r.id} style={{borderTop:'1px solid rgba(226,232,240,.7)'}}>
+            <td style={{padding:'7px 11px'}}>{prettyDate(r.effectiveDate)}</td>
+            <td style={{padding:'7px 11px',color:'#64748B'}}>{r.oldSalary==null?'—':inr(r.oldSalary)}</td>
+            <td style={{padding:'7px 11px',fontWeight:700}}>{inr(r.newSalary)}</td>
+            <td style={{padding:'7px 11px',color:up?'#15803D':'#B91C1C',fontWeight:700}}>
+              {r.oldSalary==null?'—':(up?'▲ ':'▼ ')+inr(Math.abs(Number(r.newSalary)-Number(r.oldSalary)))}
+            </td>
+            <td style={{padding:'7px 11px',color:'#64748B'}}>{r.reason||'—'}</td>
+            <td style={{padding:'7px 11px',color:'#94A3B8',fontSize:11.5}}>{r.revisedBy||'—'}</td>
+          </tr>})}
+        </tbody>
+      </table>
+    </div>}
+  </div>
+}
+
+// ── Employee documents ───────────────────────────────────────────────
+const DOC_TYPES=['Offer Letter','Appointment Letter','ID Proof','Photo','Resume','Other']
+const DOC_MAX=8*1024*1024
+function DocumentsPanel({emp,canEdit=true}){
+  const[docs,setDocs]=useState(null)
+  const[type,setType]=useState('Offer Letter')
+  const[busy,setBusy]=useState(false)
+  const load=useCallback(()=>{documentAPI.forEmployee(emp.id).then(r=>setDocs(r.data.data||[])).catch(()=>setDocs([]))},[emp.id])
+  useEffect(()=>{load()},[load])
+  const upload=async file=>{
+    if(!file) return
+    if(file.size>DOC_MAX){toast('That file is larger than 8 MB','error');return}
+    if(!['application/pdf','image/jpeg','image/jpg','image/png'].includes(file.type)){
+      toast('Only PDF, JPG and PNG files can be attached','error');return
+    }
+    setBusy(true)
+    try{
+      const data=await new Promise((res,rej)=>{
+        const fr=new FileReader()
+        fr.onload=()=>res(String(fr.result).split(',')[1])
+        fr.onerror=()=>rej(new Error('read failed'))
+        fr.readAsDataURL(file)
+      })
+      await documentAPI.upload({employeeId:emp.id,docType:type,fileName:file.name,contentType:file.type,data})
+      toast(`${file.name} attached`);load()
+    }catch(e){toast(e.response?.data?.message||'Upload failed','error')}
+    finally{setBusy(false)}
+  }
+  // Fetched on demand and handed to the browser as a blob, so the bytes never sit in
+  // the listing and a PDF opens in the viewer rather than as a wall of base64.
+  const open=async d=>{
+    try{
+      const f=(await documentAPI.download(d.id)).data.data
+      const bin=atob(f.data)
+      const bytes=new Uint8Array(bin.length)
+      for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i)
+      const url=URL.createObjectURL(new Blob([bytes],{type:f.contentType||'application/octet-stream'}))
+      const a=document.createElement('a')
+      a.href=url;a.download=f.fileName||'document'
+      document.body.appendChild(a);a.click();document.body.removeChild(a)
+      setTimeout(()=>URL.revokeObjectURL(url),15000)
+    }catch(e){toast(e.response?.data?.message||'Could not download','error')}
+  }
+  const del=d=>confirmAction({
+    title:'Delete document',
+    message:<>Delete <b>{d.fileName}</b>?</>,
+    detail:'The file is removed from the database. This cannot be undone.',
+    danger:'Delete document',
+    onConfirm:async()=>{try{await documentAPI.delete(d.id);toast('Document removed','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const kb=n=>n==null?'—':n<1024?n+' B':n<1048576?Math.round(n/1024)+' KB':(n/1048576).toFixed(1)+' MB'
+  return<div>
+    {canEdit&&<div style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:11,padding:'13px 15px',marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:9}}>Attach a document</div>
+      <div style={{display:'flex',gap:9,flexWrap:'wrap',alignItems:'center'}}>
+        <Sel value={type} onChange={setType}>{DOC_TYPES.map(t=><option key={t} value={t}>{t}</option>)}</Sel>
+        <label style={{background:'rgba(59,130,246,.1)',border:'1px solid rgba(59,130,246,.25)',borderRadius:8,padding:'8px 14px',cursor:busy?'wait':'pointer',fontSize:12.5,fontWeight:600,color:'#1D4ED8',whiteSpace:'nowrap'}}>
+          {busy?'Uploading…':'⬆ Choose file'}
+          <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{display:'none'}} onChange={e=>{upload(e.target.files?.[0]);e.target.value=''}}/>
+        </label>
+      </div>
+      <div style={{fontSize:11.5,color:'#94A3B8',marginTop:8}}>PDF, JPG or PNG · up to 8 MB · a document typed <b>Photo</b> is printed on this person's payslip</div>
+    </div>}
+    {docs===null?<Spin/>
+     :!docs.length?<div style={{fontSize:12.5,color:'#94A3B8',lineHeight:1.6,padding:'8px 0'}}>Nothing attached yet.{canEdit?' Offer letters, ID proofs, a photo and a résumé all belong here.':''}</div>
+     :<div style={{border:'1px solid #E2E8F0',borderRadius:10,overflow:'hidden'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Type','File','Size','Uploaded',''].map(h=><th key={h} style={{padding:'8px 11px',textAlign:'left',fontSize:10.5,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.4px'}}>{h}</th>)}</tr></thead>
+        <tbody>{docs.map(d=><tr key={d.id} style={{borderTop:'1px solid rgba(226,232,240,.7)'}}>
+          <td style={{padding:'7px 11px',fontWeight:600}}>{d.docType}</td>
+          <td style={{padding:'7px 11px',color:'#64748B',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={d.fileName}>{d.fileName}</td>
+          <td style={{padding:'7px 11px',color:'#94A3B8'}}>{kb(d.sizeBytes)}</td>
+          <td style={{padding:'7px 11px',color:'#94A3B8',fontSize:11.5}}>{d.uploadedAt?new Date(d.uploadedAt).toLocaleDateString():'—'}</td>
+          <td style={{padding:'7px 11px',textAlign:'right'}}><div style={{display:'inline-flex',gap:5}}>
+            <BtnO onClick={()=>open(d)} style={{padding:'4px 10px',fontSize:11.5}}>⬇</BtnO>
+            {canEdit&&<BtnD onClick={()=>del(d)}>🗑</BtnD>}
+          </div></td>
+        </tr>)}
+        </tbody>
+      </table>
+    </div>}
+  </div>
+}
+
+// ── Company settings ─────────────────────────────────────────────────
+function CompanySettings(){
+  const[f,setF]=useState(null);const[busy,setBusy]=useState(false)
+  useEffect(()=>{settingsAPI.get().then(r=>setF(r.data.data)).catch(()=>toast('Could not load settings','error'))},[])
+  const set=k=>v=>setF(p=>({...p,[k]:v}))
+  const save=async()=>{
+    if(!String(f.companyName||'').trim()){toast('The company name is required','warn');return}
+    if(!(Number(f.workingDaysPerMonth)>0)){toast('Working days per month must be at least 1','warn');return}
+    setBusy(true)
+    try{
+      const r=await settingsAPI.update(f)
+      setF(r.data.data);setCompany(r.data.data)
+      toast('Company settings saved')
+    }catch(e){toast(e.response?.data?.message||'Could not save settings','error')}
+    finally{setBusy(false)}
+  }
+  // The logo travels as a data: URI so it survives a backup and prints on a payslip
+  // without needing a file server behind it.
+  const pickLogo=async file=>{
+    if(!file) return
+    if(file.size>512*1024){toast('Keep the logo under 500 KB','warn');return}
+    if(!['image/png','image/jpeg','image/jpg'].includes(file.type)){toast('The logo must be a PNG or JPG','warn');return}
+    const data=await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(String(fr.result));fr.readAsDataURL(file)})
+    setF(p=>({...p,logo:data}))
+    toast('Logo loaded — remember to save','info')
+  }
+  if(!f) return<div><PH title="Company Settings" sub="Loading…"/><Spin/></div>
+  const Group=({title,sub,children})=><Card style={{padding:'20px 22px',marginBottom:14}}>
+    <div style={{fontWeight:800,fontSize:14,marginBottom:sub?3:14}}>{title}</div>
+    {sub&&<div style={{fontSize:12.5,color:'#64748B',marginBottom:14,lineHeight:1.6}}>{sub}</div>}
+    {children}
+  </Card>
+  const G2={display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 14px'}
+  const G3={display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'0 14px'}
+  return<div>
+    <PH title="Company Settings" sub="Your company's identity, payroll rates and leave quotas">
+      <Btn onClick={save} disabled={busy}>{busy?'Saving…':'💾 Save Settings'}</Btn>
+    </PH>
+    <Group title="Identity" sub="This is what appears on every payslip and printed report — not AXVON's name.">
+      <div style={G2}>
+        <Fld label="Company Name *"><Inp value={f.companyName} onChange={set('companyName')}/></Fld>
+        <Fld label="Logo">
+          <div style={{display:'flex',gap:9,alignItems:'center'}}>
+            {f.logo&&<img src={f.logo} alt="" style={{height:34,maxWidth:90,objectFit:'contain',border:'1px solid #E2E8F0',borderRadius:6,padding:2}}/>}
+            <label style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:8,padding:'8px 13px',cursor:'pointer',fontSize:12.5,fontWeight:600,whiteSpace:'nowrap'}}>
+              {f.logo?'Replace':'Choose PNG / JPG'}
+              <input type="file" accept=".png,.jpg,.jpeg" style={{display:'none'}} onChange={e=>{pickLogo(e.target.files?.[0]);e.target.value=''}}/>
+            </label>
+            {f.logo&&<BtnD onClick={()=>setF(p=>({...p,logo:null}))}>Remove</BtnD>}
+          </div>
+        </Fld>
+      </div>
+      <Fld label="Address"><Inp value={f.address} onChange={set('address')} placeholder="Street and building"/></Fld>
+      <div style={G3}>
+        <Fld label="City"><Inp value={f.city} onChange={set('city')}/></Fld>
+        <Fld label="State"><Inp value={f.state} onChange={set('state')}/></Fld>
+        <Fld label="Pincode"><Inp value={f.pincode} onChange={set('pincode')}/></Fld>
+      </div>
+      <div style={G3}>
+        <Fld label="Phone"><Inp value={f.phone} onChange={set('phone')}/></Fld>
+        <Fld label="Email"><Inp value={f.email} onChange={set('email')}/></Fld>
+        <Fld label="Website"><Inp value={f.website} onChange={set('website')}/></Fld>
+      </div>
+      <div style={G3}>
+        <Fld label="GSTIN"><Inp value={f.gstin} onChange={set('gstin')}/></Fld>
+        <Fld label="Currency"><Inp value={f.currency} onChange={set('currency')} placeholder="INR"/></Fld>
+        <Fld label="Currency Symbol"><Inp value={f.currencySymbol} onChange={set('currencySymbol')} placeholder="₹"/></Fld>
+      </div>
+    </Group>
+    <Group title="Working calendar" sub="Working days per month is the divisor behind a day's pay, so it decides what an unauthorised absence costs.">
+      <div style={G3}>
+        <Fld label="Financial Year Starts (MM-DD)"><Inp value={f.financialYearStart} onChange={set('financialYearStart')} placeholder="04-01"/></Fld>
+        <Fld label="Working Days / Week"><Inp type="number" value={f.workingDaysPerWeek} onChange={set('workingDaysPerWeek')}/></Fld>
+        <Fld label="Weekly Off"><Sel value={f.weeklyOff||'Sunday'} onChange={set('weeklyOff')}>{['Sunday','Saturday','Saturday & Sunday','Friday','None'].map(d=><option key={d} value={d}>{d}</option>)}</Sel></Fld>
+      </div>
+      <div style={G2}>
+        <Fld label="Working Days / Month *"><Inp type="number" value={f.workingDaysPerMonth} onChange={set('workingDaysPerMonth')}/></Fld>
+        <Fld label="Deduct pay for absent days">
+          <label style={{display:'flex',gap:9,alignItems:'center',border:'1.5px solid #E2E8F0',borderRadius:9,padding:'9px 12px',cursor:'pointer',fontSize:13}}>
+            <input type="checkbox" checked={f.deductAbsentDays!==false} onChange={e=>setF(p=>({...p,deductAbsentDays:e.target.checked}))}/>
+            <span>{f.deductAbsentDays!==false?'On — absences become loss of pay':'Off — absences cost nothing'}</span>
+          </label>
+        </Fld>
+      </div>
+    </Group>
+    <Group title="Payroll rates" sub="Read every time payroll runs. Percentages are whole numbers — 40 means 40%. Approved leave is never deducted; only unauthorised absence is.">
+      <div style={G3}>
+        <Fld label="HRA %"><Inp type="number" value={f.hraPercent} onChange={set('hraPercent')}/></Fld>
+        <Fld label="Special Allowance %"><Inp type="number" value={f.specialAllowancePercent} onChange={set('specialAllowancePercent')}/></Fld>
+        <Fld label="PF %"><Inp type="number" value={f.pfPercent} onChange={set('pfPercent')}/></Fld>
+      </div>
+      <div style={G3}>
+        <Fld label="ESI %"><Inp type="number" value={f.esiPercent} onChange={set('esiPercent')}/></Fld>
+        <Fld label="ESI applies under (₹)"><Inp type="number" value={f.esiThreshold} onChange={set('esiThreshold')}/></Fld>
+        <Fld label="Professional Tax (₹)"><Inp type="number" value={f.professionalTax} onChange={set('professionalTax')}/></Fld>
+      </div>
+      <div style={G3}><Fld label="TDS %"><Inp type="number" value={f.tdsPercent} onChange={set('tdsPercent')}/></Fld></div>
+    </Group>
+    <Group title="Annual leave quotas" sub="Days granted per employee per calendar year. Changing a quota applies to the running year too. Unpaid, maternity and paternity leave carry no quota and are never blocked.">
+      <div style={G2}>
+        <Fld label="Casual Leave"><Inp type="number" value={f.casualLeaveQuota} onChange={set('casualLeaveQuota')}/></Fld>
+        <Fld label="Sick Leave"><Inp type="number" value={f.sickLeaveQuota} onChange={set('sickLeaveQuota')}/></Fld>
+        <Fld label="Earned Leave"><Inp type="number" value={f.earnedLeaveQuota} onChange={set('earnedLeaveQuota')}/></Fld>
+        <Fld label="Comp Off"><Inp type="number" value={f.compOffQuota} onChange={set('compOffQuota')}/></Fld>
+      </div>
+    </Group>
+    <div style={{display:'flex',justifyContent:'flex-end',marginBottom:20}}>
+      <Btn onClick={save} disabled={busy}>{busy?'Saving…':'💾 Save Settings'}</Btn>
+    </div>
+  </div>
+}
+
+// ── Audit log ────────────────────────────────────────────────────────
+const ACTION_TONE=a=>/DELETE|RESET|FAILED|DISABLED/.test(a)?'#DC2626'
+  :/CREATED|APPROVED|SUCCESS|ENABLED|RESTORED/.test(a)?'#15803D'
+  :/CHANGED|UPDATED|RESET_/.test(a)?'#B45309':'#475569'
+function AuditLog(){
+  const[data,setData]=useState(null);const[actions,setActions]=useState([])
+  const[f,setF]=useState({action:'',who:'',from:'',to:''})
+  const[page,setPage]=useState(0);const[size,setSize]=useState(25)
+  const[loading,setLoading]=useState(true)
+  const load=useCallback(()=>{
+    setLoading(true)
+    auditAPI.search({...f,page,size})
+      .then(r=>setData(r.data.data))
+      .catch(()=>toast('Could not load the audit log','error'))
+      .finally(()=>setLoading(false))
+  },[f,page,size])
+  useEffect(()=>{load()},[load])
+  useEffect(()=>{auditAPI.actions().then(r=>setActions(r.data.data||[])).catch(()=>setActions([]))},[])
+  const set=k=>v=>{setPage(0);setF(p=>({...p,[k]:v}))}
+  const rows=data?.rows||[]
+  const total=data?.totalRows||0
+  const pages=data?.totalPages||1
+  const DATE_IN={border:'1.5px solid #E2E8F0',borderRadius:8,padding:'7px 10px',fontSize:12.5,fontFamily:'inherit',outline:'none'}
+  return<div>
+    <PH title="Audit Log" sub={`${total} recorded event${total===1?'':'s'} · who changed what, and when`}/>
+    <Card style={{padding:'13px 16px',marginBottom:13}}>
+      <div style={{display:'flex',gap:9,flexWrap:'wrap',alignItems:'center'}}>
+        <select value={f.action} onChange={e=>set('action')(e.target.value)} style={{...DATE_IN,fontWeight:600}}>
+          <option value="">All actions</option>
+          {actions.map(a=><option key={a} value={a}>{a.replace(/_/g,' ')}</option>)}
+        </select>
+        <input value={f.who} onChange={e=>set('who')(e.target.value)} placeholder="Performed by…" style={{...DATE_IN,minWidth:170}}/>
+        <span style={{fontSize:12,color:'#94A3B8'}}>From</span>
+        <input type="date" value={f.from} onChange={e=>set('from')(e.target.value)} style={DATE_IN}/>
+        <span style={{fontSize:12,color:'#94A3B8'}}>to</span>
+        <input type="date" value={f.to} onChange={e=>set('to')(e.target.value)} style={DATE_IN}/>
+        <BtnO onClick={()=>{setF({action:'',who:'',from:'',to:''});setPage(0)}}>Clear filters</BtnO>
+      </div>
+    </Card>
+    <Card>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['When','Action','Record','Before','After','By','IP'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+        {loading?<Skeleton cols={7}/>:<tbody>{rows.map(r=><tr key={r.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+          <td style={{padding:'10px 14px',whiteSpace:'nowrap',color:'#64748B',fontSize:12}}>{r.performedAt?new Date(r.performedAt).toLocaleString():'—'}</td>
+          <td style={{padding:'10px 14px'}}><span style={{fontSize:11,fontWeight:700,color:ACTION_TONE(r.action||''),background:ACTION_TONE(r.action||'')+'14',border:`1px solid ${ACTION_TONE(r.action||'')}28`,borderRadius:20,padding:'2px 9px',whiteSpace:'nowrap'}}>{String(r.action||'').replace(/_/g,' ')}</span></td>
+          <td style={{padding:'10px 14px',color:'#64748B',fontSize:12}}>{r.entityType}{r.entityId?` #${r.entityId}`:''}</td>
+          <td style={{padding:'10px 14px',fontSize:12,color:'#B91C1C',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis'}} title={r.oldValue||''}>{r.oldValue||'—'}</td>
+          <td style={{padding:'10px 14px',fontSize:12,color:'#15803D',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis'}} title={r.newValue||''}>{r.newValue||'—'}</td>
+          <td style={{padding:'10px 14px',fontSize:12,fontWeight:600}}>{r.performedBy||'—'}</td>
+          <td style={{padding:'10px 14px',fontSize:11.5,color:'#94A3B8',fontFamily:'monospace'}}>{r.ipAddress||'—'}</td>
+        </tr>)}
+        </tbody>}
+      </table></div>
+      {!loading&&!rows.length&&<Empty icon="📜" title="Nothing recorded for these filters"
+        sub="Employee edits, salary changes, role changes, approvals, payroll runs and deletions all appear here as they happen."/>}
+      {total>0&&<div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'10px 14px',borderTop:'1px solid #E2E8F0',flexWrap:'wrap'}}>
+        <div style={{fontSize:12,color:'#64748B'}}>Showing <b style={{color:'#0F172A'}}>{page*size+1}–{Math.min((page+1)*size,total)}</b> of <b style={{color:'#0F172A'}}>{total}</b> records</div>
+        <div style={{display:'flex',alignItems:'center',gap:7}}>
+          <select value={size} onChange={e=>{setSize(Number(e.target.value));setPage(0)}} style={{border:'1px solid #E2E8F0',borderRadius:8,padding:'5px 8px',fontSize:12,fontFamily:'inherit',outline:'none'}}>
+            {PAGE_SIZES.map(n=><option key={n} value={n}>{n} / page</option>)}
+          </select>
+          <BtnO onClick={()=>setPage(p=>Math.max(0,p-1))} style={{padding:'5px 11px',fontSize:12,opacity:page===0?.5:1}}>‹ Prev</BtnO>
+          <span style={{fontSize:12,color:'#64748B',minWidth:64,textAlign:'center'}}>Page {page+1} of {pages}</span>
+          <BtnO onClick={()=>setPage(p=>Math.min(pages-1,p+1))} style={{padding:'5px 11px',fontSize:12,opacity:page>=pages-1?.5:1}}>Next ›</BtnO>
+        </div>
+      </div>}
+    </Card>
+  </div>
+}
+
+// ── Resignations (HR view) ───────────────────────────────────────────
+function ResignForm({emps,onDone,forSelf,meEmp}){
+  const today=ymd(new Date())
+  const[f,setF]=useState({employeeId:forSelf?(meEmp?.id||''):'',resignationDate:today,noticePeriodDays:30,lastWorkingDay:'',reason:''})
+  const[busy,setBusy]=useState(false)
+  // Shown as a suggestion, not silently applied — the operator can still override it.
+  const suggested=f.resignationDate?ymd(new Date(new Date(f.resignationDate).getTime()+(Number(f.noticePeriodDays)||0)*86400000)):''
+  const submit=async()=>{
+    if(!forSelf&&!f.employeeId){toast('Select an employee','warn');return}
+    setBusy(true)
+    try{
+      await resignationAPI.submit({...f,lastWorkingDay:f.lastWorkingDay||suggested,employeeId:forSelf?undefined:Number(f.employeeId)})
+      toast('Resignation submitted');closeModal();onDone&&onDone()
+    }catch(e){toast(e.response?.data?.message||'Could not submit','error')}
+    finally{setBusy(false)}
+  }
+  return<div>
+    {!forSelf&&<Fld label="Employee *"><Sel value={f.employeeId} onChange={v=>setF({...f,employeeId:v})}><option value="">— Select —</option>{emps.map(e=><option key={e.id} value={e.id}>{e.firstName} {e.lastName} ({e.empId})</option>)}</Sel></Fld>}
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+      <Fld label="Resignation Date"><Inp type="date" value={f.resignationDate} onChange={v=>setF({...f,resignationDate:v})}/></Fld>
+      <Fld label="Notice Period (days)"><Inp type="number" value={f.noticePeriodDays} onChange={v=>setF({...f,noticePeriodDays:v})}/></Fld>
+    </div>
+    <Fld label={`Last Working Day${f.lastWorkingDay?'':` — defaults to ${prettyDate(suggested)}`}`}>
+      <Inp type="date" value={f.lastWorkingDay} onChange={v=>setF({...f,lastWorkingDay:v})}/>
+    </Fld>
+    <Fld label="Reason"><textarea value={f.reason} onChange={e=>setF({...f,reason:e.target.value})} rows={3} placeholder="Optional" style={{...SEL,resize:'vertical'}}/></Fld>
+    <FormFoot onSave={submit} busy={busy} label="Submit resignation"/>
+  </div>
+}
+function Resignations(){
+  const[rows,setRows]=useState([]);const[emps,setEmps]=useState([]);const[loading,setLoading]=useState(true);const[q,setQ]=useState('')
+  const load=useCallback(()=>{setLoading(true);resignationAPI.getAll().then(r=>setRows(r.data.data||[])).catch(()=>setRows([])).finally(()=>setLoading(false))},[])
+  useEffect(()=>{load()},[load])
+  useEffect(()=>{employeeAPI.getAll().then(r=>setEmps(r.data.data||[])).catch(()=>setEmps([]))},[])
+  const approve=r=>confirmAction({
+    title:'Approve resignation',
+    message:<>Approve <b>{r.employee?.firstName} {r.employee?.lastName}</b>'s resignation?</>,
+    detail:`Their status becomes Resigned and their last working day is set to ${prettyDate(r.lastWorkingDay)}. A Resigned employee is left out of future payroll runs.`,
+    danger:'Approve', tone:'#16A34A',
+    onConfirm:async()=>{try{await resignationAPI.approve(r.id);toast('Resignation approved');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const reject=r=>confirmAction({
+    title:'Reject resignation',
+    message:<>Reject <b>{r.employee?.firstName} {r.employee?.lastName}</b>'s resignation?</>,
+    detail:'If it had already been approved, they go back to Active and their last working day is cleared.',
+    danger:'Reject',
+    onConfirm:async()=>{try{await resignationAPI.reject(r.id,'Rejected');toast('Resignation rejected','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const del=r=>confirmAction({
+    title:'Delete resignation record',
+    message:<>Delete this resignation record for <b>{r.employee?.firstName} {r.employee?.lastName}</b>?</>,
+    detail:"The employee's current status is left as it is. This cannot be undone.",
+    danger:'Delete',
+    onConfirm:async()=>{try{await resignationAPI.delete(r.id);toast('Deleted','warn');closeModal();load()}catch(e){toast(e.response?.data?.message||'Error','error')}}})
+  const filtered=rows.filter(r=>!q.trim()||norm(`${r.employee?.firstName||''} ${r.employee?.lastName||''} ${r.status||''}`).includes(norm(q)))
+  const p=usePager(filtered)
+  const pending=rows.filter(r=>r.status==='Pending').length
+  return<div>
+    <PH title="Resignations" sub={`${pending} awaiting a decision · notice periods and last working days`}>
+      <Btn onClick={()=>openModal('Record a Resignation',<ResignForm emps={emps} onDone={load}/>)}>+ Record Resignation</Btn>
+    </PH>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:13,marginBottom:16}}>
+      <St label="Pending" value={pending} color="#F59E0B"/>
+      <St label="Approved" value={rows.filter(r=>r.status==='Approved').length} color="#EF4444"/>
+      <St label="Rejected" value={rows.filter(r=>r.status==='Rejected').length} color="#64748B"/>
+      <St label="Total" value={rows.length} color="#3B82F6"/>
+    </div>
+    <Card style={{padding:12,marginBottom:13}}><Inp value={q} onChange={setQ} placeholder="Search by employee name or status…"/></Card>
+    <Card>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Employee','Resigned On','Notice','Last Working Day','Reason','Status','Actions'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+        {loading?<Skeleton cols={7}/>:<tbody>{p.rows.map(r=><tr key={r.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+          <td style={{padding:'11px 14px'}}><div style={{display:'flex',alignItems:'center',gap:9}}><Av name={`${r.employee?.firstName} ${r.employee?.lastName}`} size={28}/><div><div style={{fontWeight:600}}>{r.employee?.firstName} {r.employee?.lastName}</div><div style={{fontSize:11,color:'#94A3B8'}}>{r.employee?.designation||'—'}</div></div></div></td>
+          <td style={{padding:'11px 14px'}}>{prettyDate(r.resignationDate)}</td>
+          <td style={{padding:'11px 14px'}}>{r.noticePeriodDays}d</td>
+          <td style={{padding:'11px 14px',fontWeight:600}}>{prettyDate(r.lastWorkingDay)}</td>
+          <td style={{padding:'11px 14px',color:'#64748B',fontSize:12,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis'}} title={r.reason||''}>{r.reason||'—'}</td>
+          <td style={{padding:'11px 14px'}}><Badge label={r.status}/></td>
+          <td style={{padding:'11px 14px',textAlign:'right'}}><div style={{display:'inline-flex',gap:5}}>
+            {r.status!=='Approved'&&<button onClick={()=>approve(r)} style={{background:'#22C55E',border:'none',borderRadius:7,padding:'5px 10px',color:'#fff',cursor:'pointer',fontFamily:'inherit',fontSize:12,fontWeight:700}}>✓ Approve</button>}
+            {r.status!=='Rejected'&&<BtnD onClick={()=>reject(r)}>Reject</BtnD>}
+            <BtnD onClick={()=>del(r)}>🗑</BtnD>
+          </div></td>
+        </tr>)}
+        </tbody>}
+      </table></div>
+      {!loading&&!filtered.length&&(q.trim()
+        ?<Empty icon="🔍" title={`Nothing matches “${q}”`} sub="Search by the employee's name or by status."/>
+        :<Empty icon="🚪" title="No resignations" sub="Nobody has resigned. Staff can also submit their own from My Profile."/>)}
+      <Pager p={p}/>
+    </Card>
+  </div>
+}
+
+// ── Self-service ─────────────────────────────────────────────────────
+const NotLinked=()=><Card><Empty icon="🔗" title="Your login is not linked to an employee record"
+  sub="Ask an administrator to link your account to your employee record in Users & Access. Until then there is nothing personal to show here — the data exists, but nothing connects it to this login."/></Card>
+function MyProfile(){
+  const[d,setD]=useState(null);const[loading,setLoading]=useState(true)
+  const load=useCallback(()=>{setLoading(true);meAPI.profile().then(r=>setD(r.data.data)).catch(()=>setD(null)).finally(()=>setLoading(false))},[])
+  useEffect(()=>{load()},[load])
+  if(loading) return<div><PH title="My Profile" sub="Loading…"/><Spin/></div>
+  if(!d?.linked) return<div><PH title="My Profile"/><NotLinked/></div>
+  const e=d.employee
+  const open=(d.resignations||[]).find(r=>r.status==='Pending')
+  const approved=(d.resignations||[]).find(r=>r.status==='Approved')
+  const Row=({k,v})=><div style={{display:'flex',justifyContent:'space-between',gap:12,padding:'8px 0',borderBottom:'1px solid rgba(226,232,240,.7)',fontSize:13}}>
+    <span style={{color:'#64748B'}}>{k}</span><span style={{fontWeight:600,textAlign:'right'}}>{v??'—'}</span>
+  </div>
+  return<div>
+    <PH title="My Profile" sub="Your own record, as HR holds it"/>
+    <Card style={{padding:'22px 24px',marginBottom:14,display:'flex',gap:18,alignItems:'center',flexWrap:'wrap'}}>
+      <Av name={e.firstName+' '+e.lastName} size={64}/>
+      <div style={{flex:1,minWidth:200}}>
+        <div style={{fontSize:20,fontWeight:900}}>{e.firstName} {e.lastName}</div>
+        <div style={{fontSize:13,color:'#64748B',marginTop:3}}>{e.designation||'—'} · {e.department?.name||'Unassigned'}</div>
+        <div style={{marginTop:8}}><Badge label={e.status}/></div>
+      </div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <BtnO onClick={()=>openModal('Change My Password',<MyPasswordForm/>)}>🔑 Change password</BtnO>
+        {!open&&!approved&&<BtnD onClick={()=>openModal('Submit My Resignation',<ResignForm forSelf meEmp={e} onDone={load}/>)}>🚪 Submit resignation</BtnD>}
+      </div>
+    </Card>
+    {open&&<Card style={{padding:'14px 18px',marginBottom:14,borderLeft:'4px solid #F59E0B'}}>
+      <div style={{fontWeight:700,fontSize:13.5,marginBottom:3}}>Resignation submitted — awaiting HR</div>
+      <div style={{fontSize:12.5,color:'#64748B'}}>Dated {prettyDate(open.resignationDate)} · last working day {prettyDate(open.lastWorkingDay)}</div>
+    </Card>}
+    {approved&&<Card style={{padding:'14px 18px',marginBottom:14,borderLeft:'4px solid #EF4444'}}>
+      <div style={{fontWeight:700,fontSize:13.5,marginBottom:3}}>Resignation approved</div>
+      <div style={{fontSize:12.5,color:'#64748B'}}>Your last working day is {prettyDate(approved.lastWorkingDay)}.{approved.hrComment?` HR noted: ${approved.hrComment}`:''}</div>
+    </Card>}
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
+      <Card style={{padding:'20px 22px'}}>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>Employment</div>
+        <Row k="Employee ID" v={e.empId}/>
+        <Row k="Email" v={e.email}/>
+        <Row k="Phone" v={e.phone}/>
+        <Row k="Location" v={e.location}/>
+        <Row k="Manager" v={e.manager}/>
+        <Row k="Joined" v={e.joinDate?prettyDate(e.joinDate):null}/>
+        <Row k="Date of birth" v={e.dateOfBirth?prettyDate(e.dateOfBirth):null}/>
+        {e.lastWorkingDay&&<Row k="Last working day" v={prettyDate(e.lastWorkingDay)}/>}
+        {/* Blank rather than ₹0 when the server withheld it. */}
+        <Row k="Basic salary" v={e.basicSalary==null?'Not shown':inr(e.basicSalary)}/>
+      </Card>
+      <Card style={{padding:'20px 22px'}}>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>Leave balance · {d.balances?.[0]?.year||''}</div>
+        {(d.balances||[]).length?<BalanceBars balances={d.balances}/>
+          :<div style={{fontSize:12.5,color:'#94A3B8'}}>No quotas configured yet.</div>}
+      </Card>
+    </div>
+    <Card style={{padding:'20px 22px',marginBottom:14}}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>My documents</div>
+      <DocumentsPanel emp={e} canEdit={false}/>
+    </Card>
+    {(d.reviews||[]).length>0&&<Card style={{padding:'20px 22px'}}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>My performance reviews</div>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12.5}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Period','Goals','Rating','Status','Feedback'].map(h=><th key={h} style={{padding:'8px 11px',textAlign:'left',fontSize:10.5,fontWeight:700,color:'#94A3B8',textTransform:'uppercase'}}>{h}</th>)}</tr></thead>
+        <tbody>{d.reviews.map(r=><tr key={r.id} style={{borderTop:'1px solid rgba(226,232,240,.7)'}}>
+          <td style={{padding:'7px 11px',fontWeight:600}}>{r.reviewPeriod}</td>
+          <td style={{padding:'7px 11px'}}>{r.goalsAchieved??0}/{r.goalsSet??0}</td>
+          <td style={{padding:'7px 11px',color:'#F59E0B'}}>{r.rating!=null?'★'.repeat(Math.round(r.rating))+' '+r.rating:'—'}</td>
+          <td style={{padding:'7px 11px'}}><Badge label={r.status}/></td>
+          <td style={{padding:'7px 11px',color:'#64748B'}}>{r.overallFeedback||'—'}</td>
+        </tr>)}</tbody>
+      </table></div>
+    </Card>}
+  </div>
+}
+function MyLeave(){
+  const[d,setD]=useState(null);const[loading,setLoading]=useState(true);const[meEmp,setMeEmp]=useState(null)
+  const load=useCallback(()=>{
+    setLoading(true)
+    meAPI.leave().then(r=>setD(r.data.data)).catch(()=>setD(null)).finally(()=>setLoading(false))
+    meAPI.profile().then(r=>setMeEmp(r.data.data?.employee||null)).catch(()=>setMeEmp(null))
+  },[])
+  useEffect(()=>{load()},[load])
+  const reqs=d?.requests||[]
+  const p=usePager(reqs)
+  if(loading) return<div><PH title="My Leave" sub="Loading…"/><Spin/></div>
+  if(!d?.employeeId) return<div><PH title="My Leave"/><NotLinked/></div>
+  return<div>
+    <PH title="My Leave" sub="Your own requests and balance">
+      <Btn onClick={()=>openModal('Apply for Leave',<LeaveForm canOthers={false} meEmp={meEmp} balances={d.balances||[]} onDone={load}/>)}>+ Apply Leave</Btn>
+    </PH>
+    <Card style={{padding:'18px 20px',marginBottom:14}}>
+      <div style={{fontWeight:700,fontSize:13.5,marginBottom:11}}>Balance · {d.balances?.[0]?.year||''}</div>
+      {(d.balances||[]).length?<BalanceBars balances={d.balances}/>:<div style={{fontSize:12.5,color:'#94A3B8'}}>No quotas configured.</div>}
+    </Card>
+    <Card>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Type','From','To','Days','Reason','Status'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0'}}>{h}</th>)}</tr></thead>
+        <tbody>{p.rows.map(l=><tr key={l.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+          <td style={{padding:'11px 14px',fontWeight:600}}>{l.leaveType}</td>
+          <td style={{padding:'11px 14px'}}>{prettyDate(l.fromDate)}</td>
+          <td style={{padding:'11px 14px'}}>{prettyDate(l.toDate)}</td>
+          <td style={{padding:'11px 14px',fontWeight:700}}>{l.totalDays}d</td>
+          <td style={{padding:'11px 14px',color:'#64748B',fontSize:12}}>{l.reason}{l.status==='Rejected'&&l.rejectionReason?<span style={{color:'#B91C1C'}}> · {l.rejectionReason}</span>:null}</td>
+          <td style={{padding:'11px 14px'}}><Badge label={l.status}/></td>
+        </tr>)}
+        </tbody>
+      </table></div>
+      {!reqs.length&&<Empty icon="🌴" title="You have not applied for any leave" sub="Apply above — the days come off your balance only once a request is approved."/>}
+      <Pager p={p}/>
+    </Card>
+  </div>
+}
+function MyAttendance(){
+  const today=ymd(new Date())
+  const[from,setFrom]=useState(today.slice(0,7)+'-01');const[to,setTo]=useState(today)
+  const[d,setD]=useState(null);const[loading,setLoading]=useState(true)
+  const load=useCallback(()=>{setLoading(true);meAPI.attendance(from,to).then(r=>setD(r.data.data)).catch(()=>setD(null)).finally(()=>setLoading(false))},[from,to])
+  useEffect(()=>{load()},[load])
+  const recs=d?.records||[]
+  const p=usePager(recs,25)
+  const DATE_IN={border:'1.5px solid #E2E8F0',borderRadius:8,padding:'7px 10px',fontSize:12.5,fontFamily:'inherit',outline:'none'}
+  return<div>
+    <PH title="My Attendance" sub="Your own marked days">
+      <input type="date" value={from} max={today} onChange={e=>setFrom(e.target.value)} style={DATE_IN}/>
+      <span style={{fontSize:12,color:'#94A3B8',alignSelf:'center'}}>to</span>
+      <input type="date" value={to} max={today} onChange={e=>setTo(e.target.value)} style={DATE_IN}/>
+    </PH>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:13,marginBottom:16}}>
+      <St label="Days Marked" value={d?.marked??'—'} color="#3B82F6"/>
+      <St label="Present" value={d?.present??'—'} color="#22C55E"/>
+      <St label="On Leave" value={d?.leave??'—'} color="#F59E0B"/>
+      <St label="Absent" value={d?.absent??'—'} color="#EF4444"/>
+    </div>
+    <Card>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Date','Status','Check In','Check Out','Hours','Notes'].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0'}}>{h}</th>)}</tr></thead>
+        {loading?<Skeleton cols={6}/>:<tbody>{p.rows.map(a=><tr key={a.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+          <td style={{padding:'11px 14px',fontWeight:600}}>{prettyDate(a.attendanceDate)}</td>
+          <td style={{padding:'11px 14px'}}><Badge label={a.status}/></td>
+          <td style={{padding:'11px 14px'}}>{a.checkIn||'—'}</td>
+          <td style={{padding:'11px 14px'}}>{a.checkOut||'—'}</td>
+          <td style={{padding:'11px 14px'}}>{a.workingHours??'—'}</td>
+          <td style={{padding:'11px 14px',color:'#64748B',fontSize:12}}>{a.notes||'—'}</td>
+        </tr>)}
+        </tbody>}
+      </table></div>
+      {!loading&&!recs.length&&<Empty icon="⏱" title="Nothing marked in this period"
+        sub="Attendance is recorded by HR or your manager. Widen the dates above to look further back."/>}
+      <Pager p={p}/>
+    </Card>
+  </div>
+}
+function MyPayslips(){
+  const[rows,setRows]=useState([]);const[loading,setLoading]=useState(true)
+  useEffect(()=>{meAPI.payslips().then(r=>setRows(r.data.data||[])).catch(()=>setRows([])).finally(()=>setLoading(false))},[])
+  const p=usePager(rows)
+  const ytd=rows.reduce((s,r)=>s+(Number(r.netSalary)||0),0)
+  return<div>
+    <PH title="My Payslips" sub="Only your own — nobody else's pay is visible here"/>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:13,marginBottom:16}}>
+      <St label="Payslips" value={rows.length} color="#3B82F6"/>
+      <St label="Total Net Paid" value={inr(ytd)} sub="Across every payslip listed" color="#22C55E"/>
+      <St label="Latest Month" value={rows[0]?.payMonth||'—'} color="#14B8A6"/>
+    </div>
+    <Card>
+      <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#F8FAFC'}}>{['Month','Days Paid','Gross','Deductions','Net','Status',''].map(h=><th key={h} style={{padding:'10px 14px',textAlign:'left',fontSize:11,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',borderBottom:'1px solid #E2E8F0'}}>{h}</th>)}</tr></thead>
+        {loading?<Skeleton cols={7}/>:<tbody>{p.rows.map(r=><tr key={r.id} style={{borderBottom:'1px solid rgba(226,232,240,.6)'}}>
+          <td style={{padding:'11px 14px',fontWeight:700}}>{r.payMonth}</td>
+          <td style={{padding:'11px 14px',color:'#64748B'}}>{r.payableDays??'—'}{r.absentDays?<span style={{color:'#B91C1C'}}> · {r.absentDays} absent</span>:null}</td>
+          <td style={{padding:'11px 14px'}}>{inr(r.grossSalary)}</td>
+          <td style={{padding:'11px 14px',color:'#B91C1C'}}>−{inr(r.totalDeduction)}</td>
+          <td style={{padding:'11px 14px',fontWeight:900,color:'#22C55E'}}>{inr(r.netSalary)}</td>
+          <td style={{padding:'11px 14px'}}><Badge label={r.status}/></td>
+          <td style={{padding:'11px 14px',textAlign:'right'}}><BtnO onClick={()=>payslip(r)} style={{padding:'5px 11px',fontSize:12}}>⬇ Slip</BtnO></td>
+        </tr>)}
+        </tbody>}
+      </table></div>
+      {!loading&&!rows.length&&<Empty icon="🧾" title="No payslips yet"
+        sub="Payslips appear here once HR has run payroll for a month that includes you."/>}
+      <Pager p={p}/>
+    </Card>
+  </div>
+}
+
+// ── Notification bell ────────────────────────────────────────────────
+function Bell(){
+  const[data,setData]=useState(null);const[open,setOpen]=useState(false)
+  const seen=useRef(0)
+  useEffect(()=>{
+    let alive=true
+    const pull=()=>notificationAPI.all().then(r=>{
+      if(!alive) return
+      const d=r.data.data
+      // A new pending leave request is worth a desktop notification; the counters
+      // moving for any other reason is not.
+      const pending=(d.items||[]).find(i=>i.type==='leave')?.count||0
+      if(seen.current&&pending>seen.current&&window.electronAPI?.notify)
+        window.electronAPI.notify({title:'AXVON HRMS',body:`${pending} leave request${pending===1?'':'s'} awaiting approval`})
+      seen.current=pending
+      setData(d)
+    }).catch(()=>{})
+    pull()
+    const t=setInterval(pull,60000)
+    return()=>{alive=false;clearInterval(t)}
+  },[])
+  const items=data?.items||[]
+  const n=items.reduce((s,i)=>s+(i.severity==='warn'?1:0),0)||items.length
+  const go=i=>{setOpen(false);window.navTo&&window.navTo(i.page)}
+  return<div style={{position:'relative'}}>
+    <button onClick={()=>setOpen(o=>!o)} title={items.length?`${items.length} notification${items.length===1?'':'s'}`:'Nothing needs attention'}
+      style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:9,padding:'6px 10px',cursor:'pointer',fontSize:15,position:'relative',fontFamily:'inherit'}}>
+      🔔
+      {items.length>0&&<span style={{position:'absolute',top:-5,right:-5,background:'#EF4444',color:'#fff',borderRadius:20,fontSize:9.5,fontWeight:800,padding:'1px 5px',minWidth:16,textAlign:'center'}}>{items.length>99?'99+':items.length}</span>}
+    </button>
+    {open&&<>
+      <div onClick={()=>setOpen(false)} style={{position:'fixed',inset:0,zIndex:600}}/>
+      <div style={{position:'absolute',right:0,top:40,width:330,maxHeight:400,overflowY:'auto',background:'#fff',border:'1px solid #E2E8F0',borderRadius:13,boxShadow:'0 16px 40px rgba(0,0,0,.13)',zIndex:601}}>
+        <div style={{padding:'12px 16px',borderBottom:'1px solid #E2E8F0',fontWeight:800,fontSize:13,position:'sticky',top:0,background:'#fff',borderRadius:'13px 13px 0 0'}}>
+          Notifications {items.length>0&&<span style={{color:'#94A3B8',fontWeight:500}}>· {items.length}</span>}
+        </div>
+        {!items.length?<div style={{padding:'26px 18px',textAlign:'center',fontSize:12.5,color:'#94A3B8',lineHeight:1.6}}>
+          Nothing needs your attention. Pending approvals, unfinished payroll, birthdays and work anniversaries show up here.
+        </div>
+        :items.map((i,ix)=><button key={ix} onClick={()=>go(i)} style={{display:'block',width:'100%',textAlign:'left',padding:'11px 16px',border:'none',borderBottom:'1px solid rgba(226,232,240,.7)',background:'transparent',cursor:'pointer',fontFamily:'inherit'}}
+          onMouseOver={e=>e.currentTarget.style.background='#F8FAFC'} onMouseOut={e=>e.currentTarget.style.background='transparent'}>
+          <div style={{display:'flex',gap:9,alignItems:'flex-start'}}>
+            <span style={{fontSize:15}}>{i.type==='leave'?'🌴':i.type==='resignation'?'🚪':i.type==='payroll'?'💰':i.type==='birthday'?'🎂':'🎉'}</span>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12.5,fontWeight:700,color:i.severity==='warn'?'#B45309':'#0F172A'}}>{i.title}</div>
+              <div style={{fontSize:11.5,color:'#64748B',marginTop:1}}>{i.detail}</div>
+            </div>
+          </div>
+        </button>)}
+      </div>
+    </>}
+  </div>
+}
+
 function Shell({user,onLogout}){
-  const[page,setPage]=useState('dashboard');const[col,setCol]=useState(false)
+  const[page,setPage]=useState(homeFor(user.role));const[col,setCol]=useState(false)
   const[online,setOnline]=useState(true)
+  const[co,setCo]=useState(company())
   window.navTo=setPage
+  // The company's own name, loaded once and cached for payslips and the footer.
+  useEffect(()=>{settingsAPI.get().then(r=>{setCompany(r.data.data);setCo(company())}).catch(()=>{})},[])
   // The status pill used to be hardcoded green. Poll health instead: any HTTP reply
   // means the backend answered; only a dead connection counts as offline.
   useEffect(()=>{
@@ -1771,12 +2944,15 @@ function Shell({user,onLogout}){
     const t=setInterval(ping,15000)
     return()=>{alive=false;clearInterval(t)}
   },[])
-  const pages={dashboard:<Dashboard user={user}/>,employees:<Employees/>,attendance:<Attendance/>,leave:<Leave/>,payroll:<Payroll/>,recruitment:<Recruitment/>,performance:<Performance/>,departments:<Departments/>,holidays:<Holidays/>,reports:<Reports/>,bulk:<BulkImport/>,users:<Users me={user}/>,admin:<Admin/>,about:<About/>}
+  const pages={dashboard:<Dashboard user={user}/>,employees:<Employees me={user}/>,attendance:<Attendance/>,leave:<Leave me={user}/>,payroll:<Payroll/>,recruitment:<Recruitment/>,performance:<Performance/>,departments:<Departments/>,holidays:<Holidays/>,reports:<Reports/>,bulk:<BulkImport/>,users:<Users me={user}/>,admin:<Admin/>,about:<About/>,
+    settings:<CompanySettings/>,audit:<AuditLog/>,resignations:<Resignations/>,
+    myprofile:<MyProfile/>,myleave:<MyLeave/>,myattendance:<MyAttendance/>,mypayslips:<MyPayslips/>}
   const nav=navFor(user.role)
   // navTo() can still be handed a page this role has no access to — the Reports cards
   // link straight to Attendance, for one. Fall back rather than render a screen whose
   // every request answers 403.
-  const view=nav.flatMap(g=>g.items).some(i=>i.id===page)?page:'dashboard'
+  const home=homeFor(user.role)
+  const view=nav.flatMap(g=>g.items).some(i=>i.id===page)?page:home
   const label=nav.flatMap(g=>g.items).find(i=>i.id===view)?.l||'Dashboard'
   return<div style={{display:'flex',height:'100vh',overflow:'hidden'}}>
     <nav style={{width:col?62:230,background:'#0F172A',display:'flex',flexDirection:'column',flexShrink:0,transition:'width .2s',overflow:'hidden'}}>
@@ -1808,6 +2984,7 @@ function Shell({user,onLogout}){
         <button onClick={()=>setCol(c=>!c)} style={{background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:8,padding:7,cursor:'pointer',fontSize:16,color:'#94A3B8'}}>☰</button>
         <div style={{display:'flex',alignItems:'center',gap:5,fontSize:13.5}}><span style={{color:'#94A3B8',fontSize:12}}>AXVON</span><span style={{color:'#E2E8F0'}}>›</span><span style={{fontWeight:800}}>{label}</span></div>
         <div style={{flex:1}}/>
+        <Bell/>
         <div title={online?'Backend responding on port 17823':'No response from the backend on port 17823'} style={{fontSize:11,color:online?'#15803D':'#B91C1C',background:online?'#F0FDF4':'#FEF2F2',border:`1px solid ${online?'#BBF7D0':'#FECACA'}`,padding:'4px 10px',borderRadius:20,fontWeight:600}}>{online?'🟢 Backend Connected':'🔴 Backend Offline'}</div>
         <div style={{display:'flex',alignItems:'center',gap:9,padding:'5px 11px',background:'#F8FAFC',border:'1px solid #E2E8F0',borderRadius:10}}>
           <Av name={user.name||'User'} size={26}/><div><div style={{fontSize:12,fontWeight:700}}>{user.name}</div><div style={{fontSize:10,color:'#94A3B8'}}>{user.role?.replace(/_/g,' ')}</div></div>
@@ -1817,7 +2994,7 @@ function Shell({user,onLogout}){
         <div key={view} style={{animation:'fadeUp .22s ease'}}>{pages[view]||<Dashboard user={user}/>}</div>
       </div>
       <div style={{background:'#fff',borderTop:'1px solid #E2E8F0',padding:'8px 26px',display:'flex',justifyContent:'space-between',flexShrink:0}}>
-        <div style={{fontSize:11,color:'#94A3B8'}}><b style={{color:'#14B8A6'}}>AXVON HRMS</b> · React 18 + Spring Boot 3 + H2 Database · Full Stack</div>
+        <div style={{fontSize:11,color:'#94A3B8'}}><b style={{color:'#14B8A6'}}>{co.companyName||'AXVON'}</b> · running on AXVON HRMS · React 18 + Spring Boot 3 + H2</div>
         <div style={{fontSize:11,color:'#94A3B8'}}>Crafted with ❤ by <b style={{color:'#14B8A6'}}>Athul KV</b> · v2.0.0 · © 2025 AXVON</div>
       </div>
     </div>
@@ -1830,12 +3007,15 @@ export default function App(){
     setTimeout(()=>setSplash(false),2400)
     const saved=localStorage.getItem('axvon_user')
     if(saved)try{setUser(JSON.parse(saved))}catch{}
+    // Keep the restored session alive rather than letting it lapse mid-shift.
+    scheduleRefresh()
     // If the database has no accounts this is a fresh installation: send the operator
     // to setup rather than a login screen nobody has a password for.
     setupAPI.status().then(r=>setSetup(r.data.data)).catch(()=>setSetup({initialized:true,demoAccounts:false}))
   },[])
-  const logout=()=>{localStorage.clear();setUser(null)}
-  const afterSetup=u=>{setSetup(s=>({...s,initialized:true}));setUser(u)}
+  const logout=()=>{stopRefresh();localStorage.clear();setUser(null)}
+  const afterSetup=u=>{setSetup(s=>({...s,initialized:true}));scheduleRefresh();setUser(u)}
+  const afterLogin=u=>{scheduleRefresh();setUser(u)}
   return<>
     <Toasts/><Modal/>
     {splash&&<div style={{position:'fixed',inset:0,background:'#0F172A',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:9999,transition:'opacity .5s'}}>
@@ -1847,7 +3027,7 @@ export default function App(){
     </div>}
     {!setup?null
      :!setup.initialized?<Setup onDone={afterSetup}/>
-     :!user?<Login onLogin={setUser} showDemo={setup.demoAccounts}/>
+     :!user?<Login onLogin={afterLogin} showDemo={setup.demoAccounts}/>
      :<Shell user={user} onLogout={logout}/>}
   </>
 }

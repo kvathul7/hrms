@@ -13,6 +13,12 @@ node_modules/
 
 # Installer download cache
 _tools/
+_build_tools/
+
+# The backend jar is copied here by BUILD_AXVON.bat, never committed
+electron/backend/
+*.jar
+!backend/.mvn/wrapper/*.jar
 
 # Local data and logs
 *.log

@@ -17,6 +17,13 @@ public class Payroll {
     @Column(precision=12,scale=2) private BigDecimal esiDeduction;
     @Column(precision=12,scale=2) private BigDecimal professionalTax;
     @Column(precision=12,scale=2) private BigDecimal tdsDeduction;
+    // Loss of pay for unauthorised absence. Approved leave is counted separately and
+    // deliberately costs nothing.
+    @Column(precision=12,scale=2) private BigDecimal lopDeduction;
+    private Integer presentDays;
+    private Integer absentDays;
+    private Integer leaveDays;
+    private Integer payableDays;
     @Column(precision=12,scale=2) private BigDecimal totalDeduction;
     @Column(precision=12,scale=2) private BigDecimal netSalary;
     @Enumerated(EnumType.STRING) @Builder.Default private Status status=Status.Draft;

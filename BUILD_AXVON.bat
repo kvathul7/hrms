@@ -61,8 +61,12 @@ echo [OK] Node.js installed
 
 :maven
 :: ── MAVEN ───────────────────────────────────────────────────────
+:: The project now ships a Maven wrapper (backend\mvnw.cmd), which downloads the
+:: right Maven itself. If it is there, nothing needs installing.
 echo.
 echo [3/6] Checking Maven...
+set MVN=mvn
+if exist "%WORK%backend\mvnw.cmd" (set MVN=call "%WORK%backend\mvnw.cmd" & echo [OK] Using the bundled Maven wrapper & goto :backend)
 mvn -version >nul 2>&1
 if %errorlevel% equ 0 (echo [OK] Maven found & goto :backend)
 echo [INFO] Downloading Maven...
@@ -80,24 +84,56 @@ echo [OK] Maven installed
 :backend
 :: ── BUILD BACKEND ───────────────────────────────────────────────
 echo.
-echo [4/6] Building Spring Boot backend...
+echo [4/7] Building Spring Boot backend...
 echo       (First run downloads ~50MB dependencies - takes 3-5 min)
 cd "%WORK%backend"
-call mvn clean package -DskipTests -q
-if %errorlevel% neq 0 (echo [ERROR] Backend build failed! Check internet. & pause & exit /b 1)
+:: Tests DO run here (~15 seconds). They cover payroll arithmetic, leave balances and
+:: the role rules - the things that quietly cost money if they break - so an installer
+:: is never built from code that fails them. NOT -q either: a quiet build hides the
+:: error that explains the failure, and the window is usually gone before anyone reads it.
+%MVN% clean package
+if %errorlevel% neq 0 (
+  echo.
+  echo  ============================================================
+  echo   [ERROR] Backend build FAILED.
+  echo   If the failure is a TEST, look for "Tests run:" above - the
+  echo   named test says what broke. Otherwise scroll to the first
+  echo   [ERROR] line. Check Java 17+ and your internet connection.
+  echo  ============================================================
+  echo.
+  pause & exit /b 1
+)
 mkdir "%WORK%electron\backend" 2>nul
-copy "target\axvon-hrms.jar" "%WORK%electron\backend\axvon-hrms.jar" >nul
-echo [OK] Backend JAR built
+:: Rebuild order matters: the installer packages whatever jar is sitting here, so a
+:: stale copy would ship old code with a new front end.
+copy /Y "target\axvon-hrms.jar" "%WORK%electron\backend\axvon-hrms.jar" >nul
+if not exist "%WORK%electron\backend\axvon-hrms.jar" (echo [ERROR] Could not copy the backend JAR into electron\backend. & pause & exit /b 1)
+echo [OK] Backend JAR built and copied
+echo.
+pause
 
 :: ── BUILD FRONTEND ──────────────────────────────────────────────
 echo.
-echo [5/6] Building React frontend...
+echo [5/7] Building React frontend...
 cd "%WORK%frontend"
-call npm install --silent
+call npm install
+if %errorlevel% neq 0 (echo [ERROR] npm install failed in frontend. Check your internet connection. & pause & exit /b 1)
 call npm run build
-if %errorlevel% neq 0 (echo [ERROR] Frontend build failed! & pause & exit /b 1)
-echo [INFO] Frontend built directly into electron/frontend-dist
-echo [OK] Frontend built
+if %errorlevel% neq 0 (
+  echo.
+  echo  ============================================================
+  echo   [ERROR] Frontend build FAILED.
+  echo   The first error above names the file and line.
+  echo  ============================================================
+  echo.
+  pause & exit /b 1
+)
+:: vite.config.js writes straight into electron\frontend-dist - nothing may delete it
+:: afterwards, or the installer packages an empty window.
+if not exist "%WORK%electron\frontend-dist\index.html" (echo [ERROR] electron\frontend-dist\index.html is missing after the build. & pause & exit /b 1)
+echo [OK] Frontend built into electron\frontend-dist
+echo.
+pause
 
 :: ── BUNDLE JRE ──────────────────────────────────────────────────
 :: Ships a Java runtime inside the installer, so people who install
@@ -125,9 +161,19 @@ if exist "%WORK%electron\jre\bin\java.exe" (echo [OK] Java runtime bundled) else
 echo.
 echo [7/7] Packaging into Windows installer...
 cd "%WORK%electron"
-call npm install --silent
+call npm install
+if %errorlevel% neq 0 (echo [ERROR] npm install failed in electron. & pause & exit /b 1)
 call npm run build:win
-if %errorlevel% neq 0 (echo [ERROR] Installer build failed! & pause & exit /b 1)
+if %errorlevel% neq 0 (
+  echo.
+  echo  ============================================================
+  echo   [ERROR] Installer build FAILED.
+  echo   Common causes: this window is not running as Administrator,
+  echo   or antivirus is holding a file in electron\dist.
+  echo  ============================================================
+  echo.
+  pause & exit /b 1
+)
 
 echo.
 echo  ================================================
@@ -138,7 +184,8 @@ echo.
 echo   Share this .exe with anyone.
 echo   They double-click, install, and it works.
 echo.
-echo   Login: admin@axvon.io / admin123
+echo   A fresh install has NO accounts - the first screen
+echo   asks the operator to create their own administrator.
 echo  ================================================
 echo.
 explorer "%WORK%electron\dist"

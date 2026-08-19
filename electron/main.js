@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, shell, ipcMain, dialog, nativeImage } = require('electron')
+const { app, BrowserWindow, Menu, Tray, shell, ipcMain, dialog, nativeImage, Notification } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
@@ -28,9 +28,36 @@ const FRONTEND_DIR = app.isPackaged
 let mainWindow = null, splashWindow = null, tray = null, backendProc = null
 
 function ensureDirs() {
-  [DATA_DIR, path.join(DATA_DIR,'data'), path.join(DATA_DIR,'logs'), path.join(DATA_DIR,'uploads')].forEach(d => {
+  [DATA_DIR, path.join(DATA_DIR,'data'), path.join(DATA_DIR,'logs'), path.join(DATA_DIR,'uploads'), BACKUP_DIR].forEach(d => {
     if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true })
   })
+}
+
+// ── Automatic backup on launch ───────────────────────────────────────
+// Copies the H2 database file before the backend starts, which is the only moment
+// it is guaranteed not to be locked. This is a safety net for the "Delete Everything"
+// button and for a failing disk; the in-app JSON backup is the portable one.
+const BACKUP_DIR = path.join(DATA_DIR, 'backups')
+const KEEP_BACKUPS = 10
+function backupDatabase() {
+  try {
+    const db = path.join(DATA_DIR, 'data', 'axvondb.mv.db')
+    if (!fs.existsSync(db)) return           // first ever launch: nothing to copy yet
+    if (fs.statSync(db).size === 0) return
+    fs.mkdirSync(BACKUP_DIR, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    fs.copyFileSync(db, path.join(BACKUP_DIR, `axvondb-${stamp}.mv.db`))
+    // Keep the ten most recent and drop the rest, or a daily launch quietly fills
+    // the disk with copies of a growing database.
+    const old = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('axvondb-') && f.endsWith('.mv.db'))
+      .sort()
+      .slice(0, -KEEP_BACKUPS)
+    old.forEach(f => { try { fs.unlinkSync(path.join(BACKUP_DIR, f)) } catch {} })
+  } catch (err) {
+    // A failed backup must never stop the app from starting.
+    console.error('Backup on launch failed:', err.message)
+  }
 }
 
 function createSplash() {
@@ -109,6 +136,7 @@ function createTray() {
     { label: '🔄  Reload', click: () => mainWindow.reload() },
     { type: 'separator' },
     { label: '📁  Open Data Folder', click: () => shell.openPath(DATA_DIR) },
+    { label: '💾  Open Backups Folder', click: () => shell.openPath(BACKUP_DIR) },
     { type: 'separator' },
     { label: '❌  Quit', click: () => { app.isQuiting = true; app.quit() } }
   ]))
@@ -194,6 +222,21 @@ ipcMain.handle('open-reports-folder', () => {
   fs.mkdirSync(REPORTS_DIR, { recursive: true })
   return shell.openPath(REPORTS_DIR)
 })
+ipcMain.handle('open-backups-folder', () => {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true })
+  return shell.openPath(BACKUP_DIR)
+})
+// Native desktop notification — used when a leave request arrives while the window
+// is hidden to the tray. Silently ignored on systems that do not support them.
+ipcMain.handle('notify', (_, { title, body }) => {
+  try {
+    if (!Notification.isSupported()) return false
+    const n = new Notification({ title: String(title || APP_NAME), body: String(body || '') })
+    n.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus() } })
+    n.show()
+    return true
+  } catch { return false }
+})
 
 // Closing the window only hides it to the tray, so clicking the shortcut again
 // would otherwise launch a second copy that fights the first for port 17823 and
@@ -209,6 +252,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     ensureDirs()
+    // Before the backend opens the file and takes its lock.
+    backupDatabase()
     createSplash()
     try {
       await startBackend()
