@@ -328,21 +328,48 @@ class AiAssistantTest extends AxvonTestBase {
         // Getting this wrong means telling an Ollama user to set an API key they do not
         // need, or telling an Anthropic user to install software they do not need.
         String ollamaDown = AssistantProvider.reasonFor(
-            "ollama", true, false, "http://localhost:11434", "qwen2.5:7b");
+            "ollama", true, AssistantProvider.Probe.DOWN, "http://localhost:11434", "qwen2.5:7b");
         assertThat(ollamaDown)
-            .contains("Ollama")
+            .contains("not responding")
             .contains("ollama.com")
             .contains("ollama pull qwen2.5:7b")
             .doesNotContain("ANTHROPIC_API_KEY");
 
-        // Ollama up: configured and reachable, so nothing to report.
-        assertThat(AssistantProvider.reasonFor(
-            "ollama", true, true, "http://localhost:11434", "qwen2.5:7b")).isNull();
+        // Service up, model absent — the state during a multi-GB pull. Reporting this as
+        // ready let the panel accept a question it could not possibly answer.
+        String noModel = AssistantProvider.reasonFor(
+            "ollama", true, AssistantProvider.Probe.NO_MODEL, "http://localhost:11434", "qwen2.5:7b");
+        assertThat(noModel)
+            .contains("Ollama is running")
+            .contains("is not there yet")
+            .contains("ollama pull qwen2.5:7b")
+            .doesNotContain("ollama.com");          // it is already installed; don't resend them
 
-        String noKey = AssistantProvider.reasonFor("anthropic", false, true, "", "");
+        assertThat(AssistantProvider.reasonFor(
+            "ollama", true, AssistantProvider.Probe.READY, "http://localhost:11434", "qwen2.5:7b")).isNull();
+
+        String noKey = AssistantProvider.reasonFor(
+            "anthropic", false, AssistantProvider.Probe.READY, "", "");
         assertThat(noKey).contains("ANTHROPIC_API_KEY").doesNotContain("Ollama");
 
-        assertThat(AssistantProvider.reasonFor("anthropic", true, true, "", "")).isNull();
+        assertThat(AssistantProvider.reasonFor(
+            "anthropic", true, AssistantProvider.Probe.READY, "", "")).isNull();
+    }
+
+    @Test
+    @DisplayName("a pulled model is recognised however it was tagged")
+    void modelPresenceDetection() {
+        String tags = "{\"models\":[{\"name\":\"qwen2.5:7b\",\"size\":4700000000}]}";
+        assertThat(AssistantProvider.hasModel(tags, "qwen2.5:7b")).isTrue();
+        // A different size of the same family is not the configured model.
+        assertThat(AssistantProvider.hasModel(tags, "qwen2.5:14b")).isFalse();
+        assertThat(AssistantProvider.hasModel(tags, "llama3.1:8b")).isFalse();
+        // An untagged pull is reported by Ollama as name:latest.
+        assertThat(AssistantProvider.hasModel(
+            "{\"models\":[{\"name\":\"qwen2.5:latest\"}]}", "qwen2.5")).isTrue();
+        // Empty registry, mid-pull.
+        assertThat(AssistantProvider.hasModel("{\"models\":[]}", "qwen2.5:7b")).isFalse();
+        assertThat(AssistantProvider.hasModel(null, "qwen2.5:7b")).isFalse();
     }
 
     @Test

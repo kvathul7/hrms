@@ -43,7 +43,18 @@ public class AssistantProvider {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(PROBE_TIMEOUT).build();
 
     private volatile long lastProbeAt = 0;
-    private volatile Boolean lastProbe = null;
+    private volatile Probe lastProbe = null;
+
+    /**
+     * What a probe of the local service found.
+     *
+     * The middle state is the one that matters and the one the first version missed:
+     * Ollama answering does NOT mean it can answer a question. Between installing Ollama
+     * and finishing `ollama pull` — several GB, so minutes — the service is up with no
+     * model, and reporting that as ready makes the panel accept a question and then fail
+     * with something unhelpful. Each state gets its own instruction instead.
+     */
+    public enum Probe { DOWN, NO_MODEL, READY }
 
     public AssistantProvider(
             @Value("${spring.ai.model.chat:anthropic}") String provider,
@@ -96,47 +107,72 @@ public class AssistantProvider {
      * readable message on the first question instead.
      */
     public boolean isReachable() {
-        if (!isOllama()) return true;
-        long now = System.currentTimeMillis();
-        Boolean cached = lastProbe;
-        if (cached != null && now - lastProbeAt < PROBE_CACHE_MS) return cached;
-        boolean up = probeOllama();
-        lastProbe = up;
-        lastProbeAt = now;
-        return up;
+        return probe() == Probe.READY;
     }
 
-    private boolean probeOllama() {
+    Probe probe() {
+        if (!isOllama()) return Probe.READY;
+        long now = System.currentTimeMillis();
+        Probe cached = lastProbe;
+        if (cached != null && now - lastProbeAt < PROBE_CACHE_MS) return cached;
+        Probe p = probeOllama();
+        lastProbe = p;
+        lastProbeAt = now;
+        return p;
+    }
+
+    private Probe probeOllama() {
         try {
             HttpRequest req = HttpRequest.newBuilder(URI.create(ollamaUrl + "/api/tags"))
                 .timeout(PROBE_TIMEOUT).GET().build();
-            HttpResponse<Void> res = http.send(req, HttpResponse.BodyHandlers.discarding());
-            return res.statusCode() >= 200 && res.statusCode() < 400;
+            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() < 200 || res.statusCode() >= 400) return Probe.DOWN;
+            return hasModel(res.body(), ollamaModel) ? Probe.READY : Probe.NO_MODEL;
         } catch (Exception e) {
             // Not an error worth a stack trace: "Ollama is not installed yet" is the
             // normal state of a fresh installation.
             log.debug("HR Assistant: Ollama not reachable at {} ({})", ollamaUrl, e.getMessage());
-            return false;
+            return Probe.DOWN;
         }
+    }
+
+    /**
+     * Is the configured model among the pulled ones?
+     *
+     * Deliberately a substring check on the /api/tags body rather than a parsed model:
+     * it only has to answer one yes/no question, and a JSON shape change in Ollama should
+     * not be able to break the assistant's availability reporting. A bare name is matched
+     * against "name:" too, because Ollama reports an untagged pull as "name:latest".
+     */
+    public static boolean hasModel(String tagsBody, String model) {
+        if (tagsBody == null || model == null || model.isBlank()) return false;
+        if (tagsBody.contains("\"" + model + "\"")) return true;
+        return !model.contains(":") && tagsBody.contains("\"" + model + ":");
     }
 
     /** Null when the assistant can answer; otherwise what the operator has to fix. */
     public String unavailableReason() {
-        return reasonFor(provider, isConfigured(), isReachable(), ollamaUrl, ollamaModel);
+        return reasonFor(provider, isConfigured(), probe(), ollamaUrl, ollamaModel);
     }
 
     /**
      * Pure so it can be asserted without booting a context or installing Ollama. The
      * wording is shown to the operator as-is, in the chat panel.
      */
-    public static String reasonFor(String provider, boolean configured, boolean reachable,
+    public static String reasonFor(String provider, boolean configured, Probe probe,
                                    String ollamaUrl, String ollamaModel) {
         if ("ollama".equals(provider)) {
-            if (!reachable)
-                return "The assistant uses Ollama, which runs the model on this computer, "
+            String model = ollamaModel == null || ollamaModel.isBlank() ? "qwen2.5:7b" : ollamaModel;
+            return switch (probe) {
+                case DOWN -> "The assistant uses Ollama, which runs the model on this computer, "
                     + "and it is not responding at " + ollamaUrl + ". Install it from ollama.com, "
-                    + "then run: ollama pull " + (ollamaModel.isBlank() ? "qwen2.5:7b" : ollamaModel);
-            return null;
+                    + "then run: ollama pull " + model;
+                // Up, but with nothing to answer with. Usually a pull still in progress.
+                case NO_MODEL -> "Ollama is running, but the model \"" + model + "\" is not there yet. "
+                    + "Run: ollama pull " + model + " — it is a few GB, so if you have just started "
+                    + "it, wait for it to finish and then reopen this page.";
+                case READY -> null;
+            };
         }
         if (!configured)
             return "The HR Assistant is not switched on for this installation. "
