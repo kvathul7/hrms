@@ -1,0 +1,20 @@
+# Keep the build context small: without this, Docker uploads node_modules, the bundled
+# JRE and any local H2 database before the build even starts.
+**/node_modules
+**/target
+**/dist
+electron/frontend-dist
+electron/backend
+electron/jre
+_tools
+_build_tools
+.git
+.github
+marketing
+*.log
+*.mv.db
+*.trace.db
+*.lock.db
+.env
+.env.*
+*.key

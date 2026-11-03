@@ -1,7 +1,7 @@
 import{useState,useEffect,useCallback,useRef}from'react'
 // The package exposes no root entry — the browser build is the one that reads a File.
 import readXlsxFile from'read-excel-file/browser'
-import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI,userAPI,setupAPI,rosterAPI,settingsAPI,auditAPI,backupAPI,salaryAPI,resignationAPI,documentAPI,notificationAPI,meAPI,scheduleRefresh,stopRefresh}from'./services/api'
+import{authAPI,employeeAPI,departmentAPI,leaveAPI,payrollAPI,holidayAPI,candidateAPI,attendanceAPI,performanceAPI,dashboardAPI,reportsAPI,adminAPI,userAPI,setupAPI,rosterAPI,settingsAPI,auditAPI,backupAPI,salaryAPI,resignationAPI,documentAPI,notificationAPI,meAPI,chatAPI,scheduleRefresh,stopRefresh}from'./services/api'
 import{saveReportAs,canSaveLocally,openReportsFolder}from'./services/exporters'
 // PDF text extraction for the attendance roster import.
 // The worker is inlined (?worker&inline → blob URL) on purpose: the packaged app
@@ -198,7 +198,11 @@ const NAV=[
     {id:'myprofile',l:'My Profile',i:'🪪'},
     {id:'myleave',l:'My Leave',i:'🗓'},
     {id:'myattendance',l:'My Attendance',i:'⏱'},
-    {id:'mypayslips',l:'My Payslips',i:'🧾'}
+    {id:'mypayslips',l:'My Payslips',i:'🧾'},
+    // No `roles`: the assistant only ever answers for the signed-in person, so there is
+    // nothing here to keep an employee out of. Uploading policy PDFs inside it is
+    // HR-only, enforced on the server.
+    {id:'assistant',l:'HR Assistant',i:'✨'}
   ]},
   {g:'Workforce',items:[{id:'employees',l:'Employees',i:'👥'},{id:'attendance',l:'Attendance',i:'🕐',roles:OFFICE_MGR},{id:'leave',l:'Leave',i:'🌴'},{id:'payroll',l:'Payroll',i:'💰',roles:OFFICE},{id:'resignations',l:'Resignations',i:'🚪',roles:OFFICE}]},
   {g:'Talent',items:[{id:'recruitment',l:'Recruitment',i:'🎯',roles:OFFICE},{id:'performance',l:'Performance',i:'⭐',roles:OFFICE_MGR}]},
@@ -2928,6 +2932,197 @@ function Bell(){
   </div>
 }
 
+// ── AXVON HR ASSISTANT ───────────────────────────────────────────────
+// Three kinds of question, one box: own-records data, filing leave, and company policy.
+// The signed-in person is resolved from the JWT on the server, so nothing about identity
+// is sent from here — the panel cannot ask about somebody else even if told to.
+const SUGGESTIONS=[
+  'How many casual leaves do I have left?',
+  'Apply 2 days casual leave from next Monday',
+  'What is the notice period?',
+  'What is my designation and joining date?'
+]
+
+// Renders the cited document, section and page under a policy answer. Without this the
+// answer is an assertion; with it, it is checkable against a real page of a real PDF.
+const Sources=({sources})=>{
+  if(!sources||!sources.length) return null
+  return<div style={{marginTop:10,paddingTop:9,borderTop:'1px dashed #E2E8F0'}}>
+    <div style={{fontSize:10,fontWeight:700,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:6}}>
+      Source{sources.length>1?'s':''}
+    </div>
+    {sources.map((s,i)=><div key={i} style={{fontSize:11.5,color:'#475569',marginBottom:6,paddingLeft:9,borderLeft:'2px solid #14B8A6'}}>
+      <div style={{fontWeight:700,color:'#0F172A'}}>
+        {s.document}{s.section?<span style={{fontWeight:500}}> — {s.section}</span>:null}
+        {s.page?<span style={{color:'#94A3B8',fontWeight:500}}> · page {s.page}</span>:null}
+      </div>
+      {s.excerpt&&<div style={{fontStyle:'italic',color:'#64748B',marginTop:2,lineHeight:1.5}}>{'“'}{s.excerpt}{'”'}</div>}
+    </div>)}
+  </div>
+}
+
+// Upload and removal are HR/owner only — whatever is indexed becomes the assistant's
+// answer for everybody, so it is an HR publication rather than a personal file. The
+// server enforces it too; this only avoids offering a button that answers 403.
+function PolicyLibrary({canManage}){
+  const[docs,setDocs]=useState(null)
+  const[busy,setBusy]=useState(false)
+  const file=useRef(null)
+  const load=useCallback(()=>{chatAPI.policies().then(r=>setDocs(r.data.data||[])).catch(()=>setDocs([]))},[])
+  useEffect(load,[load])
+  const upload=async e=>{
+    const f=e.target.files&&e.target.files[0]
+    if(!f) return
+    setBusy(true)
+    try{
+      const r=await chatAPI.uploadPolicy(f)
+      toast((r.data.data&&r.data.data.message)||'Indexed')
+      load()
+    }catch(err){
+      toast((err.response&&err.response.data&&err.response.data.message)||'Could not index that file','error')
+    }finally{
+      setBusy(false)
+      // Let the same file be re-picked after the operator fixes it.
+      if(file.current) file.current.value=''
+    }
+  }
+  const remove=async name=>{
+    try{ await chatAPI.deletePolicy(name); toast('Removed'); load() }
+    catch{ toast('Could not remove it','error') }
+  }
+  return<Card style={{padding:'16px 18px'}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:12}}>
+      <div>
+        <div style={{fontSize:13,fontWeight:800}}>Policy documents</div>
+        <div style={{fontSize:11.5,color:'#64748B',marginTop:2}}>What the assistant may quote for a policy question.</div>
+      </div>
+      {canManage&&<>
+        <input ref={file} type="file" accept="application/pdf,.pdf" onChange={upload} style={{display:'none'}}/>
+        <Btn onClick={()=>file.current&&file.current.click()} disabled={busy} style={{flexShrink:0}}>{busy?'Indexing…':'Upload PDF'}</Btn>
+      </>}
+    </div>
+    {docs===null?<div style={{fontSize:12,color:'#94A3B8'}}>Loading…</div>
+     :!docs.length?<div style={{fontSize:12,color:'#64748B',lineHeight:1.6}}>
+        None yet. Until a policy PDF is uploaded, the assistant will say policy questions are
+        not covered rather than guess at an answer.
+      </div>
+     :docs.map(d=><div key={d.fileName} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderTop:'1px solid #F1F5F9'}}>
+        <span style={{fontSize:15}}>📄</span>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:12.5,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{d.title}</div>
+          <div style={{fontSize:11,color:'#94A3B8'}}>
+            {d.pages} page{d.pages===1?'':'s'} · {d.chunks} passage{d.chunks===1?'':'s'}{d.indexedBy?' · added by '+d.indexedBy:''}
+          </div>
+        </div>
+        {canManage&&<BtnD onClick={()=>remove(d.fileName)}>Remove</BtnD>}
+      </div>)}
+  </Card>
+}
+
+function HrAssistant({me}){
+  const[status,setStatus]=useState(null)
+  const[msgs,setMsgs]=useState([])
+  const[q,setQ]=useState('')
+  const[sending,setSending]=useState(false)
+  const end=useRef(null)
+  const canManage=me&&(me.role==='SUPER_ADMIN'||me.role==='HR_ADMIN')
+  const ready=!!(status&&status.configured)
+
+  useEffect(()=>{
+    chatAPI.status().then(r=>setStatus(r.data.data)).catch(()=>setStatus({configured:false}))
+  },[])
+  // Keep the newest exchange in view as the transcript grows past the panel height.
+  useEffect(()=>{if(end.current)end.current.scrollIntoView({behavior:'smooth',block:'end'})},[msgs,sending])
+
+  const send=async text=>{
+    const question=String(text===undefined?q:text).trim()
+    if(!question||sending) return
+    setQ('')
+    setMsgs(m=>[...m,{role:'you',text:question}])
+    setSending(true)
+    try{
+      const r=await chatAPI.ask(question)
+      const d=r.data
+      // success:false is the assistant declining for a reason worth reading (no API key,
+      // model unreachable). It is a 200, so it arrives here rather than in catch.
+      if(!d.success) setMsgs(m=>[...m,{role:'axvon',text:d.message,warn:true}])
+      else setMsgs(m=>[...m,{role:'axvon',text:d.data.reply,sources:d.data.sources}])
+    }catch(err){
+      const msg=(err.response&&err.response.data&&err.response.data.message)||'Could not reach the assistant. Please try again.'
+      setMsgs(m=>[...m,{role:'axvon',text:msg,warn:true}])
+    }finally{ setSending(false) }
+  }
+
+  return<div>
+    <PH title="HR Assistant" sub="Ask about your own leave, pay and records, or about company policy">
+      {msgs.length>0&&<BtnO onClick={()=>setMsgs([])}>Clear chat</BtnO>}
+    </PH>
+
+    {status&&!status.configured&&<Card style={{padding:'13px 16px',marginBottom:16,background:'#FFFBEB',borderColor:'#FDE68A'}}>
+      <div style={{fontSize:12.5,fontWeight:700,color:'#92400E'}}>The assistant is switched off</div>
+      <div style={{fontSize:12,color:'#92400E',marginTop:3,lineHeight:1.6}}>
+        No Anthropic API key is configured on this installation. An administrator needs to set the
+        <b> ANTHROPIC_API_KEY</b> environment variable and restart AXVON. Everything else in the app
+        works normally.
+      </div>
+    </Card>}
+
+    <div style={{display:'grid',gridTemplateColumns:'minmax(0,1fr) 300px',gap:16,alignItems:'start'}}>
+      <Card style={{display:'flex',flexDirection:'column',height:'calc(100vh - 250px)',minHeight:420,overflow:'hidden'}}>
+        <div style={{flex:1,overflowY:'auto',padding:'18px 20px'}}>
+          {!msgs.length&&<Empty icon="✨" title="Ask the assistant anything"
+            sub="It reads your own records straight from the database and quotes company policy from the PDFs HR has uploaded. It will tell you when it does not know rather than guess.">
+            <div style={{display:'flex',flexDirection:'column',gap:7,maxWidth:380}}>
+              {SUGGESTIONS.map(s=><BtnO key={s} onClick={()=>send(s)} style={{fontSize:12.5,textAlign:'left'}}>{s}</BtnO>)}
+            </div>
+          </Empty>}
+
+          {msgs.map((m,i)=><div key={i} style={{display:'flex',justifyContent:m.role==='you'?'flex-end':'flex-start',marginBottom:13}}>
+            <div style={{maxWidth:'84%',padding:'10px 14px',borderRadius:13,fontSize:13,lineHeight:1.65,whiteSpace:'pre-wrap',
+              background:m.role==='you'?'#14B8A6':m.warn?'#FFFBEB':'#F8FAFC',
+              color:m.role==='you'?'#fff':m.warn?'#92400E':'#0F172A',
+              border:m.role==='you'?'none':'1px solid '+(m.warn?'#FDE68A':'#E2E8F0'),
+              borderBottomRightRadius:m.role==='you'?4:13,
+              borderBottomLeftRadius:m.role==='you'?13:4}}>
+              {m.text}
+              {m.role==='axvon'&&<Sources sources={m.sources}/>}
+            </div>
+          </div>)}
+
+          {sending&&<div style={{display:'flex',gap:5,padding:'10px 14px',alignItems:'center'}}>
+            {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:'50%',background:'#CBD5E1',
+              animation:'pulse 1.1s ease-in-out '+(i*0.18)+'s infinite'}}/>)}
+            <span style={{fontSize:11.5,color:'#94A3B8',marginLeft:5}}>Thinking…</span>
+          </div>}
+          <div ref={end}/>
+        </div>
+
+        <div style={{borderTop:'1px solid #E2E8F0',padding:'12px 14px',display:'flex',gap:9,alignItems:'flex-end',flexShrink:0}}>
+          <textarea value={q} onChange={e=>setQ(e.target.value)}
+            onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}}
+            placeholder={ready?'Ask about your leave, pay or a policy…  (Shift+Enter for a new line)':'The assistant is switched off'}
+            disabled={!ready||sending} rows={1}
+            style={{flex:1,resize:'none',maxHeight:110,border:'1.5px solid #E2E8F0',borderRadius:9,padding:'10px 12px',
+              fontSize:13,outline:'none',fontFamily:'inherit',lineHeight:1.5,background:ready?'#fff':'#F8FAFC'}}/>
+          <Btn onClick={()=>send()} disabled={!ready||sending||!q.trim()}>Send</Btn>
+        </div>
+      </Card>
+
+      <div style={{display:'flex',flexDirection:'column',gap:14}}>
+        <PolicyLibrary canManage={canManage}/>
+        <Card style={{padding:'14px 16px'}}>
+          <div style={{fontSize:12.5,fontWeight:800,marginBottom:7}}>What it can see</div>
+          <div style={{fontSize:11.5,color:'#64748B',lineHeight:1.7}}>
+            Only <b>your</b> records. The assistant takes who you are from your sign-in, not from what
+            you type, so it cannot read a colleague{'’'}s leave balance, salary or payslip — and it
+            cannot approve leave, run payroll or edit anything.
+          </div>
+        </Card>
+      </div>
+    </div>
+  </div>
+}
+
 function Shell({user,onLogout}){
   const[page,setPage]=useState(homeFor(user.role));const[col,setCol]=useState(false)
   const[online,setOnline]=useState(true)
@@ -2946,7 +3141,8 @@ function Shell({user,onLogout}){
   },[])
   const pages={dashboard:<Dashboard user={user}/>,employees:<Employees me={user}/>,attendance:<Attendance/>,leave:<Leave me={user}/>,payroll:<Payroll/>,recruitment:<Recruitment/>,performance:<Performance/>,departments:<Departments/>,holidays:<Holidays/>,reports:<Reports/>,bulk:<BulkImport/>,users:<Users me={user}/>,admin:<Admin/>,about:<About/>,
     settings:<CompanySettings/>,audit:<AuditLog/>,resignations:<Resignations/>,
-    myprofile:<MyProfile/>,myleave:<MyLeave/>,myattendance:<MyAttendance/>,mypayslips:<MyPayslips/>}
+    myprofile:<MyProfile/>,myleave:<MyLeave/>,myattendance:<MyAttendance/>,mypayslips:<MyPayslips/>,
+    assistant:<HrAssistant me={user}/>}
   const nav=navFor(user.role)
   // navTo() can still be handed a page this role has no access to — the Reports cards
   // link straight to Attendance, for one. Fall back rather than render a screen whose

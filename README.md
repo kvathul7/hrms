@@ -122,6 +122,33 @@ Saves permanently to:
                     Files are written to: C:\Users\YourName\.axvon\reports\
 11. Bulk Import   — Upload CSV file or paste rows from Excel
 12. Admin & Delete All — Per module deletion + full reset
+13. HR Assistant  — Ask about your own leave, pay and records in plain English, apply
+                    for leave by typing it, and get company-policy answers quoted from
+                    the PDFs HR uploaded, with the document, section and page cited.
+                    Off until an API key is set — see below.
+
+## SWITCHING ON THE HR ASSISTANT
+
+The assistant needs an Anthropic API key. Without one every other module works exactly
+as before and the assistant simply reports itself switched off.
+
+1. Get a key from https://console.anthropic.com
+2. Set it as a **user environment variable** named `ANTHROPIC_API_KEY`
+   (Windows: Search → "Edit environment variables for your account" → New)
+3. Restart AXVON. My Workspace → HR Assistant.
+
+The key is read from the environment only. It is never written into the installer, and
+never committed.
+
+**To answer policy questions**, sign in as the owner or HR and upload your policy PDFs in
+HR Assistant → Policy documents. Until you do, the assistant will say policy questions
+are not covered rather than invent an answer. Text-based PDFs only — a scan has to go
+through OCR first. The index lives in `C:\Users\YourName\.axvon\ai\` and is **not**
+part of the backup file, so keep the original PDFs; re-uploading rebuilds it.
+
+What the assistant can see: only the signed-in person's own records. It takes who you are
+from your sign-in rather than from what you type, so it cannot read a colleague's leave
+balance, salary or payslip, and it cannot approve leave, run payroll or edit anything.
 
 ## NO JAVA NEEDED ON USER PCs
 

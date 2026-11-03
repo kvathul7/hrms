@@ -203,4 +203,26 @@ export const meAPI = {
   attendance: (from,to)=>api.get('/me/attendance',{ params:{ from, to } }),
   leave: ()=>api.get('/me/leave')
 }
+// ── AXVON HR Assistant ───────────────────────────────────────────────
+// Every call is scoped to the signed-in person by the server: the employee is taken
+// from the JWT, never from the message text, so there is nothing to pass here.
+export const chatAPI = {
+  // { configured } tells the panel whether to offer the composer at all, instead of
+  // letting somebody type a question into an assistant with no API key behind it.
+  status: ()=>api.get('/chat/status'),
+  // → { reply, sources:[{document,fileName,section,page,score,excerpt}] }
+  // `sources` is empty for a data or action answer and populated for a policy one.
+  ask: message=>api.post('/chat',{message}),
+  policies: ()=>api.get('/chat/policies'),
+  // multipart: Content-Type must be unset so the browser adds its own boundary —
+  // the instance default of application/json would make the upload unparseable.
+  uploadPolicy: (file,title)=>{
+    const fd=new FormData()
+    fd.append('file',file)
+    if(title) fd.append('title',title)
+    return api.post('/chat/policies',fd,{ headers:{ 'Content-Type':undefined } })
+  },
+  deletePolicy: fileName=>api.delete(`/chat/policies/${encodeURIComponent(fileName)}`)
+}
+
 export default api

@@ -6,6 +6,7 @@ import com.axvon.hrms.repository.*;
 import com.axvon.hrms.config.DataInitializer;
 import com.axvon.hrms.security.JwtUtil;
 import com.axvon.hrms.service.AuditService;
+import com.axvon.hrms.service.LeaveApplicationService;
 import com.axvon.hrms.service.LeaveBalanceService;
 import com.axvon.hrms.service.SettingsService;
 import lombok.RequiredArgsConstructor;
@@ -494,6 +495,7 @@ class LeaveController {
     private final LeaveRequestRepository repo;
     private final EmployeeRepository empRepo;
     private final LeaveBalanceService balances;
+    private final LeaveApplicationService applications;
     private final AuditService audit;
     // A leave reason is medical or personal information. Approvers see the queue;
     // everyone else sees only their own requests, rather than the whole company's.
@@ -541,31 +543,16 @@ class LeaveController {
             targetId = mine;
         }
         Employee emp=empRepo.findById(targetId).orElseThrow(()->new IllegalArgumentException("Employee not found"));
-
-        String type=String.valueOf(body.get("leaveType"));
-        LocalDate from=LocalDate.parse(body.get("fromDate").toString());
-        LocalDate to=LocalDate.parse(body.get("toDate").toString());
-        if(to.isBefore(from)) throw new IllegalArgumentException("The end date is before the start date");
-        int days=body.get("totalDays")!=null?Integer.parseInt(body.get("totalDays").toString())
-                                            :(int)(to.toEpochDay()-from.toEpochDay())+1;
-        if(days<1) throw new IllegalArgumentException("A leave request must cover at least one day");
-
-        // Quota check. Types with no quota (Unpaid, Maternity, Paternity) return null
-        // and are never blocked.
-        Integer left=balances.remaining(targetId,type,from.getYear());
-        if(left!=null&&left<=0)
-            throw new IllegalArgumentException("No "+type+" leave left for "+from.getYear()+" — the balance is 0");
-        if(left!=null&&days>left)
-            throw new IllegalArgumentException(days+" days requested but only "+left+" days of "+type+" leave remain");
-
-        LeaveRequest lr=new LeaveRequest();
-        lr.setEmployee(emp);
-        lr.setLeaveType(type);
-        lr.setFromDate(from); lr.setToDate(to); lr.setTotalDays(days);
-        lr.setReason(body.get("reason")==null?"Not stated":body.get("reason").toString());
-        lr.setStatus(LeaveRequest.Status.Pending);
-        LeaveRequest saved=repo.save(lr);
-        audit.log("LEAVE_APPLIED","LeaveRequest",saved.getId(),null,emp.getFullName()+" · "+type+" · "+days+"d");
+        // Date sanity, the day count, the quota check and the audit row all live in
+        // LeaveApplicationService, because the HR Assistant's apply-leave tool files
+        // through the very same method. Authorisation above stays here: who may file
+        // for whom depends on the caller, not on the request.
+        LeaveRequest saved=applications.apply(emp,
+            String.valueOf(body.get("leaveType")),
+            LocalDate.parse(body.get("fromDate").toString()),
+            LocalDate.parse(body.get("toDate").toString()),
+            body.get("totalDays")==null?null:Integer.parseInt(body.get("totalDays").toString()),
+            body.get("reason")==null?null:body.get("reason").toString());
         return ResponseEntity.ok(ApiResponse.ok("Applied",saved));
     }
 

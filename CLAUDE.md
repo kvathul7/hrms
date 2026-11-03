@@ -13,10 +13,11 @@ AXVON HRMS is a complete enterprise-grade Human Resource Management System built
 | Layer | Technology |
 |-------|-----------|
 | Frontend | React 18 + Vite + Axios (read-excel-file for .xlsx, pdfjs-dist for PDF text) |
-| Backend | Spring Boot 3 + Spring Security + JWT + Lombok |
+| Backend | Spring Boot 3.5 + Spring Security + JWT + Lombok |
 | Database | H2 Embedded (no MySQL needed) |
 | Desktop | Electron 28 + electron-builder |
 | Auth | BCrypt + JWT tokens + Role-based access |
+| AI | Spring AI 1.1.8 + Anthropic (claude-opus-5), key from `ANTHROPIC_API_KEY` |
 | Build | Maven 3.9 + Node.js + electron-builder NSIS |
 
 ---
@@ -83,6 +84,15 @@ axvon-final-build/
 │       │   ├── AuditService.java          ← every auditable action writes through it
 │       │   ├── SettingsService.java       ← get-or-create the single settings row
 │       │   └── LeaveBalanceService.java   ← quotas, lazy rows, 1 Jan rollover
+│       ├── ai/                            ← AXVON HR Assistant (Spring AI)
+│       │   ├── ChatController.java         ← POST /api/chat, GET /api/chat/status
+│       │   ├── PolicyController.java       ← /api/chat/policies: upload/list/delete (HR only)
+│       │   ├── HrAssistantService.java     ← the one ChatClient: model, system prompt, tools
+│       │   ├── HrTools.java                ← the three @Tool methods, all self-scoped
+│       │   ├── AssistantIdentity.java      ← resolves the employee from the JWT, never the chat
+│       │   ├── PolicyLibraryService.java   ← PDF → chunk → embed → index → cite
+│       │   ├── PolicyStoreConfig.java      ← SimpleVectorStore + local ONNX model, both @Lazy
+│       │   └── AiPaths.java                ← ~/.axvon/ai, overridable so tests cannot touch it
 │       └── exception/
 │           └── GlobalExceptionHandler.java
 │
@@ -165,6 +175,8 @@ come from `DataInitializer.seedDemoData()`, which only runs on request.
 | 18 | Documents | GET/POST/DELETE /api/documents, GET /api/documents/{id}/download |
 | 19 | Self-Service | GET /api/me/profile, /me/payslips, /me/attendance, /me/leave |
 | 20 | Notifications | GET /api/notifications |
+| 21 | HR Assistant | POST /api/chat, GET /api/chat/status — authenticated; answers from the signed-in user's own records only |
+| 22 | Policy Library | GET /api/chat/policies (all roles), POST + DELETE (SUPER_ADMIN/HR_ADMIN) — the PDFs the assistant may quote |
 
 ---
 
@@ -222,7 +234,11 @@ All endpoints return:
 6. **api.js detects Electron** — uses `window.location.protocol === 'file:'` to switch baseURL
 7. **vite.config.js builds to** `../electron/frontend-dist` — do not change output dir
 8. **Lombok is used** — always have `@Data`, `@Builder`, `@NoArgsConstructor`, `@AllArgsConstructor` on entities
-9. **All controllers are in one file** — `AllControllers.java` — keep it that way
+9. **All controllers are in one file** — `AllControllers.java` — keep it that way.
+   The one exception is `ai/ChatController.java`: the HR Assistant is a self-contained
+   feature in its own package, and it follows the same style (compact
+   `@RestController @RequestMapping @RequiredArgsConstructor`, `ApiResponse` envelope,
+   `Map<String,Object>` bodies).
 10. **DataInitializer seeds data** — only runs when `userRepo.count() == 0`. It uses
     `@PostConstruct`, not `CommandLineRunner`: runners fire after the web server starts
     accepting requests, which let a fast first login read a half-seeded database.
@@ -315,6 +331,58 @@ All endpoints return:
     before expiry and, on a 401, tries exactly one `/auth/refresh` before clearing the
     session. Concurrent 401s share one in-flight refresh, or a burst of failures would
     produce a burst of refreshes.
+34. **Spring Boot is pinned to 3.5.x because of Spring AI** — not by preference. No Spring
+    AI release carrying the `@Tool` annotation supports Boot 3.2 (1.0.x is built against
+    3.4.5, 1.1.x against 3.5.15), so adding the assistant forced the parent from 3.2.0 to
+    3.5.16. Do NOT drop the parent back: Spring AI 1.1 compiles against Spring Framework
+    6.2 APIs that Boot 3.2 does not ship, and the failure is at runtime, not at resolve
+    time. Java 17 is still the floor, and `BUILD_AXVON.bat` already installs it.
+35. **A missing `ANTHROPIC_API_KEY` must never stop the backend** — the installer ships to
+    people who have no Anthropic account, and one process serves all 12 modules.
+    `spring.ai.anthropic.api-key` therefore falls back to the literal `not-configured`
+    rather than an empty string: Spring AI builds its `AnthropicApi` bean during startup
+    and an unusable value there takes the whole app down. Nothing calls Anthropic at
+    startup, so the placeholder is inert; `HrAssistantService` recognises it and declines
+    at request time. `/chat` then answers 200 with `success:false`, never a 5xx — and
+    never a 401/403, which `api.js` would read as a dead session or a role denial.
+36. **The test properties pin their own fake key** — `src/test/resources/application.properties`
+    shadows the main file on the test classpath, so the suite ignores whatever
+    `ANTHROPIC_API_KEY` the developer has exported. Tests must cost nothing, need no
+    network, and behave identically on a machine with a key and one without.
+37. **Policy RAG uses `SimpleVectorStore` on disk, never pgvector** — the product is a
+    double-click installer, so a vector store that needs a PostgreSQL server to be
+    provisioned and kept running is unusable here for the same reason MySQL is (rule 2).
+    The index is a JSON file at `~/.axvon/ai/policy-index.json`, with a sidecar
+    `policy-catalogue.json` because a `VectorStore` cannot be enumerated. The costs are
+    real and documented in `PolicyStoreConfig`: whole index in heap, linear search, one
+    writer, and **not covered by `/api/backup/export`** — re-upload the PDFs to rebuild it.
+38. **The embedding model and the vector store are `@Lazy`, and that is load-bearing** —
+    embeddings come from a local ONNX all-MiniLM-L6-v2 (bundled in the jar; no key, no
+    network, so policy search works offline). Loading it costs ~45s. Eagerly initialised
+    it took startup from 16s to **62.5s**, past the 60s timeout in `electron/main.js`, so
+    the desktop app stopped launching at all. `spring.ai.model.embedding=none` switches
+    the eager autoconfigured bean off, `PolicyStoreConfig` redefines it `@Lazy`, and
+    `PolicyLibraryService` holds an `ObjectProvider` rather than the store itself — a
+    direct field would force creation at startup and undo all of it. Measured after:
+    26.7s. Do not inject `SimpleVectorStore` or `EmbeddingModel` directly anywhere.
+39. **Every tool is self-scoped, and that is the security boundary** — `AssistantIdentity`
+    resolves the employee from the JWT principal. No tool takes an employee id, name or
+    email to act *as*, so no question can redirect one at a colleague; this is rule 26's
+    hole, which chat must not reopen. The tools are also strictly *less* privileged than
+    the REST API: `find_employee` returns a salary only on the caller's own record even
+    for HR_ADMIN, and there is deliberately no tool to approve leave, run payroll, read
+    the audit log or edit anything.
+40. **Leave application logic lives in `LeaveApplicationService`** — extracted from
+    `LeaveController.apply` so the chat tool and the form share one copy of the date
+    checks, the day count and the quota rule. Authorisation stays in the controller
+    (who may file for whom depends on the caller); the tool forces the signed-in
+    employee. Do not re-inline it, and do not reimplement any of it inside a tool.
+41. **The Dockerfile is backend-only and is not how the product ships** — it exists for
+    CI, a dev frontend, or a reviewer with curl. `BUILD_AXVON.bat` and the Electron
+    packaging remain the real build. `.github/workflows/ci.yml` runs `mvn test` with no
+    `ANTHROPIC_API_KEY` on purpose, asserts the jar is still named `axvon-hrms.jar` and
+    the frontend still lands in `electron/frontend-dist` (rules 12 and 7), and checks
+    that `/api/chat/status` answers 401 rather than 404 or 500 with no key configured.
 
 ---
 
@@ -357,8 +425,9 @@ mvn clean package -DskipTests -X
 
 ## Tests
 ```bash
-cd backend && mvn test            # 45 tests, about 15 seconds
+cd backend && mvn test            # 66 tests, about 2 minutes
 mvn test -Dtest=PayrollGenerationTest
+mvn test -Dtest=AiAssistantTest
 ```
 `src/test/resources/application.properties` pins an **in-memory** database and a fixed JWT
 secret. Both matter: the real datasource is `~/.axvon/data/axvondb`, and `BackupRestoreTest`
@@ -372,6 +441,7 @@ wipes every table — it must never be pointed at live HR data. The fixed secret
 | `AuthorizationTest` | the leave-authorisation rule, salary masking, role denials, 401 vs 403 |
 | `BackupRestoreTest` | export/restore round trip, restoring over live data, documents and settings |
 | `AuditAndSalaryTest` | salary history from both doors, audit trail, cascade deletes, resignation flow |
+| `AiAssistantTest` | the three tools, self-scoping and salary masking through chat, policy retrieval and citations, HR-only policy upload. The `ChatModel` bean is mocked — nothing reaches api.anthropic.com |
 
 The tests are **not** `@Transactional`. A rollback-per-test wrapper would hide the exact
 defect class they exist for — the restore bug only appeared because flush ordering

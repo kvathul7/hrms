@@ -44,6 +44,11 @@ backups/
 !.env.example
 *.key
 jwt.key
+# The HR Assistant reads ANTHROPIC_API_KEY from the environment. If you would rather
+# keep it in a file, put it in one of these — never in application.properties, which is
+# packaged into the jar and shipped inside the installer.
+backend/src/main/resources/application-local.properties
+backend/src/main/resources/application-secrets.properties
 
 # Editor / OS
 .vscode/

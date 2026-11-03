@@ -1,0 +1,144 @@
+name: CI
+
+# The gate the HR Assistant work added: the backend suite covers the leave-authorisation
+# rule, payroll loss-of-pay, backup restore and the assistant's tool scoping, and none of
+# those should be able to regress unnoticed on a push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same branch.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          # 17 is the floor and the ceiling: BUILD_AXVON.bat bundles a Temurin 17 runtime
+          # into the installer, so the CI JDK has to match what customers actually run.
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run the test suite
+        working-directory: backend
+        # No ANTHROPIC_API_KEY is set, and that is deliberate — the suite must not depend
+        # on a secret, must not spend money, and must not reach api.anthropic.com. The
+        # test properties pin their own fake key and the ChatModel bean is mocked, so a
+        # run here is identical to a run on a developer's machine.
+        run: mvn -B --no-transfer-progress test
+
+      - name: Publish the test report
+        # Runs even on failure: a red build is exactly when the report is wanted.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: backend/target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+  package:
+    name: Package jar + frontend
+    runs-on: ubuntu-latest
+    # Only worth packaging something the tests have already vouched for.
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build the backend jar
+        working-directory: backend
+        # Tests already ran in the previous job; re-running them here would double the
+        # wall clock for no extra signal.
+        run: mvn -B --no-transfer-progress clean package -DskipTests
+
+      - name: Check the jar name BUILD_AXVON.bat expects
+        # The installer copies target/axvon-hrms.jar by exact name (finalName in pom.xml).
+        # A rename would break packaging on a Windows machine long after this push.
+        run: test -f backend/target/axvon-hrms.jar
+
+      - name: Build the frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Check the frontend landed where vite.config.js says
+        # Rule 7: the build output must stay at electron/frontend-dist, or the Electron
+        # package ships without a UI.
+        run: test -f electron/frontend-dist/index.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axvon-backend-jar
+          path: backend/target/axvon-hrms.jar
+          retention-days: 14
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Nothing is pushed: this job only proves the Dockerfile still builds. Publishing
+          # is a release decision, not a per-push one.
+          push: false
+          load: true
+          tags: axvon-hrms:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start it and wait for the health endpoint
+        run: |
+          docker run -d --name axvon -p 17823:17823 \
+            -e AXVON_JWT_SECRET=ci-only-signing-key-0123456789abcdef \
+            axvon-hrms:ci
+          # Spring Boot plus the ONNX embedding model takes the best part of a minute.
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:17823/api/dashboard/health >/dev/null 2>&1; then
+              echo "backend healthy after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the backend never answered /api/dashboard/health"
+          docker logs axvon
+          exit 1
+
+      - name: The assistant must report itself off, not crash, with no API key
+        # The single most important property of this feature for the installer: a machine
+        # with no ANTHROPIC_API_KEY still serves all 12 modules.
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:17823/api/chat/status)
+          # 401 is the pass: the endpoint exists and demands a token. A 404 would mean the
+          # assistant failed to wire up; a 500 would mean it took the context down.
+          test "$code" = "401" || { echo "::error::expected 401 from /api/chat/status, got $code"; docker logs axvon; exit 1; }
+
+      - if: always()
+        run: docker rm -f axvon || true
