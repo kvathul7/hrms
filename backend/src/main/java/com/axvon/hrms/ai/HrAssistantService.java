@@ -3,7 +3,6 @@ package com.axvon.hrms.ai;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -28,19 +27,15 @@ import java.util.Set;
  *    fetched before the model is called and injected as context with their document name,
  *    page and section, so the answer can be cited and the citation can be checked.
  *
- * On the missing-key case: the installer ships to people who have no Anthropic account,
- * and the backend starting is not optional — the same process serves every one of the 12
- * existing modules. So the key resolves to a deliberate placeholder when
- * ANTHROPIC_API_KEY is unset (see application.properties), the Spring AI beans build
- * normally, and this class refuses at *request* time instead. Nothing calls the API
- * during startup, so a placeholder is inert.
+ * Which model answers is {@link AssistantProvider}'s business — Ollama locally by default,
+ * Anthropic when a key is set. Either way the backend must start: the same process serves
+ * all 12 existing modules, so an absent model is never allowed to be a startup failure.
+ * Nothing contacts a model during startup, and this class refuses at *request* time with
+ * whatever sentence the provider says the operator needs to act on.
  */
 @Service
 @Slf4j
 public class HrAssistantService {
-
-    /** Matches the fallback in application.properties. Never a usable key. */
-    static final String NOT_CONFIGURED = "not-configured";
 
     private static final String SYSTEM_PROMPT = """
         You are the AXVON HR Assistant, built into the AXVON HRMS desktop application.
@@ -101,33 +96,39 @@ public class HrAssistantService {
 
     private final ChatClient chat;
     private final PolicyLibraryService policies;
-    private final boolean configured;
+    private final AssistantProvider provider;
 
     public HrAssistantService(ChatClient.Builder builder,
                               HrTools tools,
                               PolicyLibraryService policies,
-                              @Value("${spring.ai.anthropic.api-key:}") String apiKey) {
+                              AssistantProvider provider) {
         this.policies = policies;
-        this.configured = apiKey != null
-            && !apiKey.isBlank()
-            && !NOT_CONFIGURED.equals(apiKey.trim());
+        this.provider = provider;
         this.chat = builder
             .defaultSystem(SYSTEM_PROMPT)
             // @Tool-annotated methods on this bean. Spring AI derives each schema from
             // the method signature and the @ToolParam descriptions.
             .defaultTools(tools)
             .build();
-        if (configured) {
-            log.info("HR Assistant: enabled");
-        } else {
-            log.info("HR Assistant: disabled — set ANTHROPIC_API_KEY to switch it on");
-        }
+        log.info("HR Assistant: provider={} model={} configured={}",
+            provider.name(), provider.model(), provider.isConfigured());
     }
 
-    /** True when a real API key was supplied, so the assistant can actually answer. */
+    /** True when the assistant is set up in principle — see AssistantProvider. */
     public boolean isConfigured() {
-        return configured;
+        return provider.isConfigured();
     }
+
+    /** What the panel shows: which model, and why it cannot answer if it cannot. */
+    public Health health() {
+        String reason = provider.unavailableReason();
+        return new Health(provider.name(), provider.model(), provider.isConfigured(),
+            reason == null, reason);
+    }
+
+    /** Status for the chat panel. `ready` false means `reason` tells the operator why. */
+    public record Health(String provider, String model, boolean configured,
+                         boolean ready, String reason) {}
 
     /**
      * Answer one question: retrieve policy context, let the model call tools if it needs
@@ -138,11 +139,8 @@ public class HrAssistantService {
      *         than a 500 — an HR app must not look broken because of a network hiccup.
      */
     public Answer ask(String question) {
-        if (!configured) {
-            throw new AssistantUnavailableException(
-                "The HR Assistant is not switched on for this installation. "
-                    + "An administrator needs to set the ANTHROPIC_API_KEY environment variable.");
-        }
+        String blocked = provider.unavailableReason();
+        if (blocked != null) throw new AssistantUnavailableException(blocked);
 
         List<Document> hits = policies.search(question);
         List<Citation> citations = citationsOf(hits);
@@ -162,8 +160,10 @@ public class HrAssistantService {
             // The question is not logged: it may name a colleague, a salary or a medical
             // reason for leave, and ~/.axvon/logs is a plain file on a shared PC.
             log.error("HR Assistant: the model call failed ({})", e.getMessage());
-            throw new AssistantUnavailableException(
-                "The HR Assistant could not be reached. Please try again in a moment.", e);
+            throw new AssistantUnavailableException(provider.isOllama()
+                ? "Ollama did not answer. Check it is running and that the model \""
+                    + provider.model() + "\" has been pulled."
+                : "The HR Assistant could not be reached. Please try again in a moment.", e);
         }
     }
 

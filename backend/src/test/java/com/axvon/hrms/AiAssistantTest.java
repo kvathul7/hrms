@@ -1,6 +1,7 @@
 package com.axvon.hrms;
 
 import com.axvon.hrms.ai.AiPaths;
+import com.axvon.hrms.ai.AssistantProvider;
 import com.axvon.hrms.ai.HrTools;
 import com.axvon.hrms.ai.PolicyLibraryService;
 import com.axvon.hrms.entity.Employee;
@@ -318,6 +319,43 @@ class AiAssistantTest extends AxvonTestBase {
         ArgumentCaptor<Prompt> sent = ArgumentCaptor.forClass(Prompt.class);
         org.mockito.Mockito.verify(chatModel).call(sent.capture());
         assertThat(sent.getValue().getContents()).contains(LocalDate.now().toString());
+    }
+
+    @Test
+    @DisplayName("the unavailable reason names the right fix for whichever model is selected")
+    void unavailableReasonIsProviderSpecific() {
+        // Pure logic, asserted without booting a second context or installing Ollama.
+        // Getting this wrong means telling an Ollama user to set an API key they do not
+        // need, or telling an Anthropic user to install software they do not need.
+        String ollamaDown = AssistantProvider.reasonFor(
+            "ollama", true, false, "http://localhost:11434", "qwen2.5:7b");
+        assertThat(ollamaDown)
+            .contains("Ollama")
+            .contains("ollama.com")
+            .contains("ollama pull qwen2.5:7b")
+            .doesNotContain("ANTHROPIC_API_KEY");
+
+        // Ollama up: configured and reachable, so nothing to report.
+        assertThat(AssistantProvider.reasonFor(
+            "ollama", true, true, "http://localhost:11434", "qwen2.5:7b")).isNull();
+
+        String noKey = AssistantProvider.reasonFor("anthropic", false, true, "", "");
+        assertThat(noKey).contains("ANTHROPIC_API_KEY").doesNotContain("Ollama");
+
+        assertThat(AssistantProvider.reasonFor("anthropic", true, true, "", "")).isNull();
+    }
+
+    @Test
+    @DisplayName("/chat/status tells the panel which model answers and whether it is ready")
+    @WithMockUser(username = "arjun@test.io", roles = "EMPLOYEE")
+    void statusReportsProviderAndReadiness() throws Exception {
+        // The suite pins the Anthropic path with a fake key, so it reports ready.
+        mvc.perform(get("/chat/status"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.provider").value("anthropic"))
+            .andExpect(jsonPath("$.data.configured").value(true))
+            .andExpect(jsonPath("$.data.ready").value(true))
+            .andExpect(jsonPath("$.data.reason").doesNotExist());
     }
 
     @Test

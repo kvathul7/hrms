@@ -129,16 +129,43 @@ Saves permanently to:
 
 ## SWITCHING ON THE HR ASSISTANT
 
-The assistant needs an Anthropic API key. Without one every other module works exactly
-as before and the assistant simply reports itself switched off.
+The assistant needs a language model. There are two options and AXVON ships configured
+for the first. Until one is working, every other module behaves exactly as before and the
+assistant simply says it is not ready.
 
-1. Get a key from https://console.anthropic.com
-2. Set it as a **user environment variable** named `ANTHROPIC_API_KEY`
-   (Windows: Search → "Edit environment variables for your account" → New)
+### Option A — Ollama (free, runs on your own PC, no account)  ← the default
+
+1. Install Ollama from https://ollama.com
+2. Open a terminal and pull a model that supports tool calling:
+   ```
+   ollama pull qwen2.5:7b
+   ```
+   This is a ~4.7 GB download, once. The model must support **tool calling** or the
+   assistant cannot read your leave balance — it would answer from nothing.
 3. Restart AXVON. My Workspace → HR Assistant.
 
-The key is read from the environment only. It is never written into the installer, and
-never committed.
+Nothing leaves your computer and there is nothing to pay. Answers are slower than
+Option B, and a small local model is less reliable at saying "the policy does not cover
+that" instead of guessing — which matters for HR answers.
+
+### Option B — Anthropic (paid, better at refusing to guess)
+
+1. Get a key from https://console.anthropic.com (a developer account — this is **not** the
+   same thing as a Claude chat subscription)
+2. Set two **user environment variables** (Windows: Search → "Edit environment variables
+   for your account" → New):
+
+   | Variable | Value |
+   |---|---|
+   | `ANTHROPIC_API_KEY` | `sk-ant-...` |
+   | `SPRING_AI_MODEL_CHAT` | `anthropic` |
+
+   The second one is what switches AXVON off Ollama. Setting the key alone is not enough.
+3. Restart AXVON.
+
+Roughly a third of a cent per question on the default model, and you can cap monthly
+spend in the console. The key is read from the environment only — it is never written
+into the installer and never committed.
 
 **To answer policy questions**, sign in as the owner or HR and upload your policy PDFs in
 HR Assistant → Policy documents. Until you do, the assistant will say policy questions

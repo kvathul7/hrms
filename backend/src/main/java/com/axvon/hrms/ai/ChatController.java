@@ -26,9 +26,17 @@ class ChatController {
     /** Lets the frontend hide the chat panel instead of offering a button that fails. */
     @GetMapping("/status")
     public ResponseEntity<ApiResponse<Map<String,Object>>> status(){
+        HrAssistantService.Health h=assistant.health();
         Map<String,Object> m=new LinkedHashMap<>();
-        m.put("configured",assistant.isConfigured());
         m.put("name","AXVON HR Assistant");
+        m.put("configured",h.configured());
+        // `ready` is the one the panel acts on: with Ollama the assistant is configured
+        // but unusable until the local service is running, and `reason` is the sentence
+        // shown to the operator so the frontend never has to guess the provider.
+        m.put("ready",h.ready());
+        m.put("provider",h.provider());
+        m.put("model",h.model());
+        m.put("reason",h.reason());
         return ResponseEntity.ok(ApiResponse.ok(m));
     }
 

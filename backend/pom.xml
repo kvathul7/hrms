@@ -39,6 +39,12 @@
          from ANTHROPIC_API_KEY and is never committed. A missing key must not stop the
          app from starting — the installer ships to people who do not have one. -->
     <dependency><groupId>org.springframework.ai</groupId><artifactId>spring-ai-starter-model-anthropic</artifactId></dependency>
+    <!-- Ollama runs a model on the operator's own machine: no API key, no account, no
+         network. It is the DEFAULT provider (spring.ai.model.chat=ollama) so a fresh
+         install can answer without anybody signing up for anything. Both starters are
+         kept on the classpath and selected by that one property, so switching to
+         Anthropic later is a config change rather than a rebuild. -->
+    <dependency><groupId>org.springframework.ai</groupId><artifactId>spring-ai-starter-model-ollama</artifactId></dependency>
     <!-- RAG over the company's policy PDFs.
          spring-ai-vector-store carries SimpleVectorStore: an in-process index that saves
          to a JSON file on disk. Chosen over pgvector because the product is a

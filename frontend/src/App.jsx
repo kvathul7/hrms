@@ -3026,7 +3026,7 @@ function HrAssistant({me}){
   const[sending,setSending]=useState(false)
   const end=useRef(null)
   const canManage=me&&(me.role==='SUPER_ADMIN'||me.role==='HR_ADMIN')
-  const ready=!!(status&&status.configured)
+  const ready=!!(status&&status.ready)
 
   useEffect(()=>{
     chatAPI.status().then(r=>setStatus(r.data.data)).catch(()=>setStatus({configured:false}))
@@ -3058,12 +3058,13 @@ function HrAssistant({me}){
       {msgs.length>0&&<BtnO onClick={()=>setMsgs([])}>Clear chat</BtnO>}
     </PH>
 
-    {status&&!status.configured&&<Card style={{padding:'13px 16px',marginBottom:16,background:'#FFFBEB',borderColor:'#FDE68A'}}>
-      <div style={{fontSize:12.5,fontWeight:700,color:'#92400E'}}>The assistant is switched off</div>
+    {status&&!status.ready&&<Card style={{padding:'13px 16px',marginBottom:16,background:'#FFFBEB',borderColor:'#FDE68A'}}>
+      <div style={{fontSize:12.5,fontWeight:700,color:'#92400E'}}>The assistant is not ready yet</div>
+      {/* The sentence comes from the server, because only it knows which model provider
+          is selected — telling an Ollama user to set an API key would be useless. */}
       <div style={{fontSize:12,color:'#92400E',marginTop:3,lineHeight:1.6}}>
-        No Anthropic API key is configured on this installation. An administrator needs to set the
-        <b> ANTHROPIC_API_KEY</b> environment variable and restart AXVON. Everything else in the app
-        works normally.
+        {status.reason||'The assistant is unavailable on this installation.'} Everything else in
+        the app works normally.
       </div>
     </Card>}
 
@@ -3112,6 +3113,10 @@ function HrAssistant({me}){
         <PolicyLibrary canManage={canManage}/>
         <Card style={{padding:'14px 16px'}}>
           <div style={{fontSize:12.5,fontWeight:800,marginBottom:7}}>What it can see</div>
+          {status&&status.provider&&<div style={{fontSize:11,color:'#94A3B8',marginBottom:7}}>
+            Answered by <b style={{color:'#475569'}}>{status.model||status.provider}</b>
+            {status.provider==='ollama'?' running on this computer':' (hosted)'}
+          </div>}
           <div style={{fontSize:11.5,color:'#64748B',lineHeight:1.7}}>
             Only <b>your</b> records. The assistant takes who you are from your sign-in, not from what
             you type, so it cannot read a colleague{'’'}s leave balance, salary or payslip — and it
