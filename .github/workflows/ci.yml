@@ -120,20 +120,24 @@ jobs:
           docker run -d --name axvon -p 17823:17823 \
             -e AXVON_JWT_SECRET=ci-only-signing-key-0123456789abcdef \
             axvon-hrms:ci
-          # Spring Boot plus the ONNX embedding model takes the best part of a minute.
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:17823/api/dashboard/health >/dev/null 2>&1; then
-              echo "backend healthy after ${i}s"; exit 0
-            fi
+          # Poll /setup/status, which is permitAll. /dashboard/health needs a token and
+          # answers 401 — and `curl -f` fails on 401, so the first version of this step
+          # reported a perfectly healthy container as dead. electron/main.js accepts
+          # 200 OR 401 for the same reason; a CI check has to be just as careful.
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+              http://localhost:17823/api/setup/status || true)
+            if [ "$code" = "200" ]; then echo "backend healthy after ${i}s"; exit 0; fi
             sleep 1
           done
-          echo "::error::the backend never answered /api/dashboard/health"
+          echo "::error::the backend never answered /api/setup/status (last code: ${code:-none})"
           docker logs axvon
           exit 1
 
-      - name: The assistant must report itself off, not crash, with no API key
+      - name: The assistant must wire up without a model present, not crash
         # The single most important property of this feature for the installer: a machine
-        # with no ANTHROPIC_API_KEY still serves all 12 modules.
+        # with no model reachable — no Ollama installed, no API key — still serves all 12
+        # modules. The container here has neither.
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:17823/api/chat/status)
           # 401 is the pass: the endpoint exists and demands a token. A 404 would mean the

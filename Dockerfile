@@ -52,8 +52,10 @@ ENV JAVA_OPTS="-Xmx768m"
 
 # Rule 1: the port is fixed at 17823. Remap on the host side with -p if it clashes.
 EXPOSE 17823
-# start-period covers Spring Boot plus the first load of the embedding model.
+# /setup/status, NOT /dashboard/health: the latter requires a token and answers 401,
+# which wget treats as a failure, so the container would report unhealthy forever while
+# serving perfectly. /setup/status is permitAll (SecurityConfig) and returns a real 200.
 HEALTHCHECK --interval=30s --timeout=4s --start-period=70s --retries=3 \
-  CMD wget -qO- http://localhost:17823/api/dashboard/health >/dev/null 2>&1 || exit 1
+  CMD wget -qO- http://localhost:17823/api/setup/status >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["sh","-c","exec java $JAVA_OPTS -jar /app/app.jar"]
